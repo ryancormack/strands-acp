@@ -1,0 +1,34 @@
+{
+  "name": "strands-acp",
+  "version": "0.1.0",
+  "description": "ACP bridge for Strands agents - expose any Strands agent via the Agent Client Protocol",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.21.0"
+  },
+  "peerDependencies": {
+    "@strands-agents/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@strands-agents/sdk": "^1.0.0",
+    "@types/node": "^25.6.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "license": "MIT"
+}
