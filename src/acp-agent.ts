@@ -50,10 +50,17 @@ function mapStopReason(strandsReason: string): acp.PromptResponse['stopReason'] 
   }
 }
 
-/** Extract ImageFormat from a MIME type string (e.g., 'image/png' -> 'png'). */
+const SUPPORTED_IMAGE_FORMATS: readonly string[] = ['png', 'jpg', 'jpeg', 'gif', 'webp']
+
+/** Extract ImageFormat from a MIME type string (e.g., 'image/png' -> 'png'). Throws for unsupported formats. */
 function extractImageFormat(mimeType: string): ImageFormat {
-  const format = mimeType.replace(/^image\//, '') as ImageFormat
-  return format
+  const format = mimeType.replace(/^image\//, '')
+  if (!SUPPORTED_IMAGE_FORMATS.includes(format)) {
+    throw new Error(
+      `Unsupported image format: '${mimeType}'. Supported formats: ${SUPPORTED_IMAGE_FORMATS.join(', ')}`,
+    )
+  }
+  return format as ImageFormat
 }
 
 export class AcpAgent implements acp.Agent {
@@ -93,6 +100,14 @@ export class AcpAgent implements acp.Agent {
     const mergedCapabilities: acp.AgentCapabilities = {
       ...defaultCapabilities,
       ...this.capabilitiesConfig,
+      sessionCapabilities: {
+        ...defaultCapabilities.sessionCapabilities,
+        ...this.capabilitiesConfig?.sessionCapabilities,
+      },
+      promptCapabilities: {
+        ...defaultCapabilities.promptCapabilities,
+        ...this.capabilitiesConfig?.promptCapabilities,
+      },
     }
 
     return {
@@ -153,6 +168,11 @@ export class AcpAgent implements acp.Agent {
   async resumeSession(params: acp.ResumeSessionRequest): Promise<acp.ResumeSessionResponse> {
     const session = this.sessions.get(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
+    // Update cwd if the resume request provides one, preserving original params otherwise
+    if (params.cwd) {
+      session.cwd = params.cwd
+      session.params = { ...session.params, cwd: params.cwd }
+    }
     session.agent = this.agentFactory(params.sessionId, session.params)
     return {}
   }
@@ -181,7 +201,12 @@ export class AcpAgent implements acp.Agent {
           const bytes = Buffer.from(imageContent.data, 'base64')
           contentBlocks.push(new ImageBlock({ format, source: { bytes } }))
         }
-        // Skip unknown block types
+        // Unknown block types are skipped
+      }
+      if (contentBlocks.length === 0) {
+        throw new Error(
+          `Prompt contained only unsupported content block types: ${params.prompt.map((b) => b.type).join(', ')}`,
+        )
       }
       invokeArgs = contentBlocks
     } else {

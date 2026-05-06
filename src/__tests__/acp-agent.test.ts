@@ -1016,4 +1016,137 @@ describe('AcpAgent', () => {
 
     expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true)
   })
+
+  // -----------------------------------------------------------------------
+  // Deep merge of nested capabilities
+  // -----------------------------------------------------------------------
+
+  it('config capabilities deep-merges sessionCapabilities without losing defaults', async () => {
+    const config: AcpBridgeConfig = {
+      agentFactory: (_sessionId, _params) => createMockAgent(),
+      capabilities: {
+        sessionCapabilities: { close: {} },
+      },
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    const response = await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    // The user only provided close, but list and resume should still be present from defaults
+    expect(response.agentCapabilities?.sessionCapabilities?.close).toEqual({})
+    expect(response.agentCapabilities?.sessionCapabilities?.list).toEqual({})
+    expect(response.agentCapabilities?.sessionCapabilities?.resume).toEqual({})
+    // promptCapabilities should also be preserved from defaults
+    expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true)
+  })
+
+  // -----------------------------------------------------------------------
+  // Invalid image format throws
+  // -----------------------------------------------------------------------
+
+  it('prompt with unsupported image format throws an error', async () => {
+    const agent = {
+      stream: async function* (_args: any) {
+        return { stopReason: 'endTurn' } as any
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const config: AcpBridgeConfig = {
+      agentFactory: (_sessionId, _params) => agent,
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({ cwd: '/test', mcpServers: [] })
+
+    await expect(
+      clientConn.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'image', data: 'abc123', mimeType: 'image/svg+xml' }],
+      }),
+    ).rejects.toThrow()
+  })
+
+  // -----------------------------------------------------------------------
+  // Prompt with only unknown block types throws
+  // -----------------------------------------------------------------------
+
+  it('prompt with only unknown block types throws an error', async () => {
+    const agent = {
+      stream: async function* (_args: any) {
+        return { stopReason: 'endTurn' } as any
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const config: AcpBridgeConfig = {
+      agentFactory: (_sessionId, _params) => agent,
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({ cwd: '/test', mcpServers: [] })
+
+    await expect(
+      clientConn.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'audio', data: 'abc123', mimeType: 'audio/mp3' } as any],
+      }),
+    ).rejects.toThrow()
+  })
+
+  // -----------------------------------------------------------------------
+  // Resume session updates cwd from request
+  // -----------------------------------------------------------------------
+
+  it('resumeSession updates cwd and params when resume provides a new cwd', async () => {
+    const factory = vi.fn((_sessionId: string, _params: any) => createMockAgent())
+    const config: AcpBridgeConfig = {
+      agentFactory: factory,
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({ cwd: '/original', mcpServers: [] })
+
+    // Resume with a different cwd
+    await clientConn.resumeSession({ sessionId: session.sessionId, cwd: '/updated' })
+
+    // The factory should be called with updated params on resume
+    expect(factory).toHaveBeenCalledTimes(2)
+    expect(factory).toHaveBeenNthCalledWith(2, session.sessionId, { cwd: '/updated', mcpServers: [] })
+
+    // Verify the session's cwd was updated (listSessions should find it by new cwd)
+    const filtered = await clientConn.listSessions({ cwd: '/updated' })
+    expect(filtered.sessions).toHaveLength(1)
+    expect(filtered.sessions[0].sessionId).toBe(session.sessionId)
+
+    // Should not be found under original cwd
+    const oldFiltered = await clientConn.listSessions({ cwd: '/original' })
+    expect(oldFiltered.sessions).toHaveLength(0)
+  })
 })
