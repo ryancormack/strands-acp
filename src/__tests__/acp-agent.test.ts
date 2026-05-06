@@ -6,9 +6,10 @@ import {
   ndJsonStream,
   type Client,
   type SessionNotification,
+  type NewSessionRequest,
 } from '@agentclientprotocol/sdk'
-import { AcpAgent } from '../acp-agent.js'
-import type { Agent } from '@strands-agents/sdk'
+import { AcpAgent, type AcpBridgeConfig } from '../acp-agent.js'
+import { TextBlock, ImageBlock, type Agent } from '@strands-agents/sdk'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,7 +52,7 @@ function createMockAgent(
  * TransformStream pairs, matching the pattern from the ACP SDK test suite.
  */
 function createConnectionPair(
-  agentFactory: (sessionId: string) => Agent,
+  config: ((sessionId: string) => Agent) | AcpBridgeConfig,
   testClient?: TestClient,
 ): {
   clientConn: ClientSideConnection
@@ -67,7 +68,7 @@ function createConnectionPair(
     ndJsonStream(clientToAgent.writable, agentToClient.readable),
   )
   const agentConn = new AgentSideConnection(
-    (conn) => new AcpAgent(conn, agentFactory),
+    (conn) => new AcpAgent(conn, config),
     ndJsonStream(agentToClient.writable, clientToAgent.readable),
   )
 
@@ -755,5 +756,264 @@ describe('AcpAgent', () => {
     expect(factory).toHaveBeenCalledTimes(2)
     expect(factory).toHaveBeenNthCalledWith(1, session.sessionId)
     expect(factory).toHaveBeenNthCalledWith(2, session.sessionId)
+  })
+
+  // -----------------------------------------------------------------------
+  // Config-based initialization with custom capabilities
+  // -----------------------------------------------------------------------
+
+  it('config-based initialization merges custom capabilities with defaults', async () => {
+    const config: AcpBridgeConfig = {
+      agentFactory: (_sessionId, _params) => createMockAgent(),
+      capabilities: {
+        loadSession: true,
+        promptCapabilities: { image: false },
+      },
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    const response = await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    expect(response.agentCapabilities?.loadSession).toBe(true)
+    expect(response.agentCapabilities?.promptCapabilities?.image).toBe(false)
+  })
+
+  // -----------------------------------------------------------------------
+  // Backwards compatibility - old factory signature still works
+  // -----------------------------------------------------------------------
+
+  it('old factory signature still works for backwards compatibility', async () => {
+    const factory = vi.fn((_sessionId: string) => createMockAgent())
+    const { clientConn } = createConnectionPair(factory)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({
+      cwd: '/test',
+      mcpServers: [],
+    })
+
+    const result = await clientConn.prompt({
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'Hello' }],
+    })
+
+    expect(result.stopReason).toBe('end_turn')
+    expect(factory).toHaveBeenCalledWith(session.sessionId)
+  })
+
+  // -----------------------------------------------------------------------
+  // Session params passed to factory in newSession
+  // -----------------------------------------------------------------------
+
+  it('newSession passes full params to the agent factory', async () => {
+    const factory = vi.fn((_sessionId: string, _params: any) => createMockAgent())
+    const config: AcpBridgeConfig = {
+      agentFactory: factory,
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const sessionParams = {
+      cwd: '/my-project',
+      mcpServers: [{ type: 'http' as const, name: 'test-server', url: 'http://localhost:3000', headers: [] }],
+    }
+
+    const session = await clientConn.newSession(sessionParams as any)
+
+    expect(factory).toHaveBeenCalledWith(session.sessionId, sessionParams)
+  })
+
+  // -----------------------------------------------------------------------
+  // resumeSession passes stored session params to factory
+  // -----------------------------------------------------------------------
+
+  it('resumeSession passes stored session params to the factory', async () => {
+    const factory = vi.fn((_sessionId: string, _params: any) => createMockAgent())
+    const config: AcpBridgeConfig = {
+      agentFactory: factory,
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const sessionParams = {
+      cwd: '/my-project',
+      mcpServers: [],
+    }
+
+    const session = await clientConn.newSession(sessionParams)
+
+    await clientConn.resumeSession({ sessionId: session.sessionId, cwd: '/my-project' })
+
+    // Both calls should receive the same session params
+    expect(factory).toHaveBeenCalledTimes(2)
+    expect(factory).toHaveBeenNthCalledWith(1, session.sessionId, sessionParams)
+    expect(factory).toHaveBeenNthCalledWith(2, session.sessionId, sessionParams)
+  })
+
+  // -----------------------------------------------------------------------
+  // Image content block mapping
+  // -----------------------------------------------------------------------
+
+  it('prompt with image content maps to Strands ImageBlock', async () => {
+    let receivedArgs: any
+    const agent = {
+      stream: async function* (args: any) {
+        receivedArgs = args
+        return { stopReason: 'endTurn' } as any
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const config: AcpBridgeConfig = {
+      agentFactory: (_sessionId, _params) => agent,
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({ cwd: '/test', mcpServers: [] })
+
+    // Create a simple 1x1 PNG as base64
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='
+
+    await clientConn.prompt({
+      sessionId: session.sessionId,
+      prompt: [
+        { type: 'image', data: pngBase64, mimeType: 'image/png' },
+      ],
+    })
+
+    // agent.stream should receive a ContentBlock array
+    expect(Array.isArray(receivedArgs)).toBe(true)
+    expect(receivedArgs).toHaveLength(1)
+    expect(receivedArgs[0]).toBeInstanceOf(ImageBlock)
+    expect(receivedArgs[0].format).toBe('png')
+    expect(receivedArgs[0].source.bytes).toBeInstanceOf(Uint8Array)
+  })
+
+  // -----------------------------------------------------------------------
+  // Mixed content (text + image) mapping
+  // -----------------------------------------------------------------------
+
+  it('prompt with mixed text and image content maps correctly', async () => {
+    let receivedArgs: any
+    const agent = {
+      stream: async function* (args: any) {
+        receivedArgs = args
+        return { stopReason: 'endTurn' } as any
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const config: AcpBridgeConfig = {
+      agentFactory: (_sessionId, _params) => agent,
+    }
+    const { clientConn } = createConnectionPair(config)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({ cwd: '/test', mcpServers: [] })
+
+    const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='
+
+    await clientConn.prompt({
+      sessionId: session.sessionId,
+      prompt: [
+        { type: 'text', text: 'Describe this image:' },
+        { type: 'image', data: pngBase64, mimeType: 'image/png' },
+      ],
+    })
+
+    // agent.stream should receive a ContentBlock array with both types
+    expect(Array.isArray(receivedArgs)).toBe(true)
+    expect(receivedArgs).toHaveLength(2)
+    expect(receivedArgs[0]).toBeInstanceOf(TextBlock)
+    expect(receivedArgs[0].text).toBe('Describe this image:')
+    expect(receivedArgs[1]).toBeInstanceOf(ImageBlock)
+    expect(receivedArgs[1].format).toBe('png')
+  })
+
+  // -----------------------------------------------------------------------
+  // Text-only prompt still passes plain string
+  // -----------------------------------------------------------------------
+
+  it('text-only prompt still passes a plain string to agent.stream', async () => {
+    let receivedArgs: any
+    const agent = {
+      stream: async function* (args: any) {
+        receivedArgs = args
+        return { stopReason: 'endTurn' } as any
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const { clientConn } = createConnectionPair((_sessionId: string) => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({ cwd: '/test', mcpServers: [] })
+
+    await clientConn.prompt({
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'Hello world' }],
+    })
+
+    expect(typeof receivedArgs).toBe('string')
+    expect(receivedArgs).toBe('Hello world')
+  })
+
+  // -----------------------------------------------------------------------
+  // Default capabilities include promptCapabilities.image=true
+  // -----------------------------------------------------------------------
+
+  it('initialize includes promptCapabilities.image=true by default', async () => {
+    const { clientConn } = createConnectionPair(agentFactory)
+
+    const response = await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true)
   })
 })

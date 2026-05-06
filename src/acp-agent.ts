@@ -1,6 +1,17 @@
 import * as acp from '@agentclientprotocol/sdk'
 
-import type { Agent } from '@strands-agents/sdk'
+import { TextBlock, ImageBlock, type Agent } from '@strands-agents/sdk'
+import type { ImageFormat } from '@strands-agents/sdk'
+
+/**
+ * Configuration for the ACP bridge.
+ */
+export interface AcpBridgeConfig {
+  /** Factory that creates a Strands Agent for each session. */
+  agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
+  /** Optional capabilities to advertise during initialization. Merged with defaults. */
+  capabilities?: Partial<acp.AgentCapabilities>
+}
 
 interface Session {
   agent: Agent
@@ -9,6 +20,7 @@ interface Session {
   createdAt: Date
   lastUpdated: Date
   title: string | null
+  params: acp.NewSessionRequest
 }
 
 function generateSessionId(): string {
@@ -38,27 +50,54 @@ function mapStopReason(strandsReason: string): acp.PromptResponse['stopReason'] 
   }
 }
 
+/** Extract ImageFormat from a MIME type string (e.g., 'image/png' -> 'png'). */
+function extractImageFormat(mimeType: string): ImageFormat {
+  const format = mimeType.replace(/^image\//, '') as ImageFormat
+  return format
+}
+
 export class AcpAgent implements acp.Agent {
   private connection: acp.AgentSideConnection
   private sessions = new Map<string, Session>()
-  private agentFactory: (sessionId: string) => Agent
+  private agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
+  private capabilitiesConfig: Partial<acp.AgentCapabilities> | undefined
 
-  constructor(connection: acp.AgentSideConnection, agentFactory: (sessionId: string) => Agent) {
+  constructor(
+    connection: acp.AgentSideConnection,
+    config: ((sessionId: string) => Agent) | AcpBridgeConfig,
+  ) {
     this.connection = connection
-    this.agentFactory = agentFactory
+    if (typeof config === 'function') {
+      // Backwards-compatible: simple factory function (ignores second param)
+      this.agentFactory = (sessionId: string, _sessionParams: acp.NewSessionRequest) => config(sessionId)
+      this.capabilitiesConfig = undefined
+    } else {
+      this.agentFactory = config.agentFactory
+      this.capabilitiesConfig = config.capabilities
+    }
   }
 
   async initialize(_params: acp.InitializeRequest): Promise<acp.InitializeResponse> {
+    const defaultCapabilities: acp.AgentCapabilities = {
+      loadSession: false,
+      sessionCapabilities: {
+        close: {},
+        list: {},
+        resume: {},
+      },
+      promptCapabilities: {
+        image: true,
+      },
+    }
+
+    const mergedCapabilities: acp.AgentCapabilities = {
+      ...defaultCapabilities,
+      ...this.capabilitiesConfig,
+    }
+
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
-      agentCapabilities: {
-        loadSession: false,
-        sessionCapabilities: {
-          close: {},
-          list: {},
-          resume: {},
-        },
-      },
+      agentCapabilities: mergedCapabilities,
       agentInfo: {
         name: 'strands-acp-agent',
         version: '0.1.0',
@@ -69,12 +108,13 @@ export class AcpAgent implements acp.Agent {
   async newSession(params: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
     const sessionId = generateSessionId()
     this.sessions.set(sessionId, {
-      agent: this.agentFactory(sessionId),
+      agent: this.agentFactory(sessionId, params),
       abortController: null,
       cwd: params.cwd,
       createdAt: new Date(),
       lastUpdated: new Date(),
       title: null,
+      params,
     })
     return { sessionId }
   }
@@ -113,7 +153,7 @@ export class AcpAgent implements acp.Agent {
   async resumeSession(params: acp.ResumeSessionRequest): Promise<acp.ResumeSessionResponse> {
     const session = this.sessions.get(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
-    session.agent = this.agentFactory(params.sessionId)
+    session.agent = this.agentFactory(params.sessionId, session.params)
     return {}
   }
 
@@ -125,16 +165,38 @@ export class AcpAgent implements acp.Agent {
     session.abortController = new AbortController()
     const { signal } = session.abortController
 
-    const text = params.prompt
-      .filter((c) => c.type === 'text')
-      .map((c) => (c as acp.TextContent & { type: 'text' }).text)
-      .join('\n')
+    // Map ACP content blocks to Strands InvokeArgs
+    const hasNonTextBlocks = params.prompt.some((c) => c.type !== 'text')
+    let invokeArgs: string | InstanceType<typeof TextBlock | typeof ImageBlock>[]
+
+    if (hasNonTextBlocks) {
+      // Map to Strands ContentBlock array
+      const contentBlocks: InstanceType<typeof TextBlock | typeof ImageBlock>[] = []
+      for (const block of params.prompt) {
+        if (block.type === 'text') {
+          contentBlocks.push(new TextBlock((block as acp.TextContent & { type: 'text' }).text))
+        } else if (block.type === 'image') {
+          const imageContent = block as acp.ImageContent & { type: 'image' }
+          const format = extractImageFormat(imageContent.mimeType)
+          const bytes = Buffer.from(imageContent.data, 'base64')
+          contentBlocks.push(new ImageBlock({ format, source: { bytes } }))
+        }
+        // Skip unknown block types
+      }
+      invokeArgs = contentBlocks
+    } else {
+      // Text-only: extract as plain string (existing behavior)
+      invokeArgs = params.prompt
+        .filter((c) => c.type === 'text')
+        .map((c) => (c as acp.TextContent & { type: 'text' }).text)
+        .join('\n')
+    }
 
     let currentToolCallId: string | undefined
     let agentResult: { stopReason: string } | undefined
 
     try {
-      const gen = session.agent.stream(text)
+      const gen = session.agent.stream(invokeArgs)
       let iterResult = await gen.next()
       while (!iterResult.done) {
         const event = iterResult.value
