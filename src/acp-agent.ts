@@ -86,7 +86,7 @@ export class AcpAgent implements acp.Agent {
 
   async initialize(_params: acp.InitializeRequest): Promise<acp.InitializeResponse> {
     const defaultCapabilities: acp.AgentCapabilities = {
-      loadSession: false,
+      loadSession: true,
       sessionCapabilities: {
         close: {},
         list: {},
@@ -132,6 +132,35 @@ export class AcpAgent implements acp.Agent {
       params,
     })
     return { sessionId }
+  }
+
+  async loadSession(params: acp.LoadSessionRequest): Promise<acp.LoadSessionResponse> {
+    const sessionParams = { cwd: params.cwd, mcpServers: params.mcpServers } as acp.NewSessionRequest
+    const agent = this.agentFactory(params.sessionId, sessionParams)
+    this.sessions.set(params.sessionId, {
+      agent,
+      abortController: null,
+      cwd: params.cwd,
+      createdAt: new Date(),
+      lastUpdated: new Date(),
+      title: null,
+      params: sessionParams,
+    })
+
+    // Stream conversation history back to the client via session updates.
+    for (const message of agent.messages) {
+      const updateType = message.role === 'user' ? 'user_message_chunk' : 'agent_message_chunk'
+      for (const block of message.content) {
+        if (block.type === 'textBlock') {
+          await this.connection.sessionUpdate({
+            sessionId: params.sessionId,
+            update: { sessionUpdate: updateType, content: { type: 'text', text: block.text } },
+          })
+        }
+      }
+    }
+
+    return {}
   }
 
   async authenticate(_params: acp.AuthenticateRequest): Promise<acp.AuthenticateResponse> {
@@ -255,7 +284,17 @@ export class AcpAgent implements acp.Agent {
             break
           }
           case 'beforeToolCallEvent': {
-            if (currentToolCallId === event.toolUse.toolUseId) break
+            if (currentToolCallId === event.toolUse.toolUseId) {
+              await this.connection.sessionUpdate({
+                sessionId: params.sessionId,
+                update: {
+                  sessionUpdate: 'tool_call_update',
+                  toolCallId: event.toolUse.toolUseId,
+                  rawInput: event.toolUse.input,
+                },
+              })
+              break
+            }
             currentToolCallId = event.toolUse.toolUseId
             await this.connection.sessionUpdate({
               sessionId: params.sessionId,
@@ -265,7 +304,7 @@ export class AcpAgent implements acp.Agent {
                 title: event.toolUse.name,
                 kind: 'execute',
                 status: 'in_progress',
-                rawInput: {},
+                rawInput: event.toolUse.input,
               },
             })
             break
