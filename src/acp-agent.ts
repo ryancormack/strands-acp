@@ -52,7 +52,7 @@ export class AcpAgent implements acp.Agent {
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
-        loadSession: false,
+        loadSession: true,
         sessionCapabilities: {
           close: {},
           list: {},
@@ -77,6 +77,34 @@ export class AcpAgent implements acp.Agent {
       title: null,
     })
     return { sessionId }
+  }
+
+  async loadSession(params: acp.LoadSessionRequest): Promise<acp.LoadSessionResponse> {
+    const agent = this.agentFactory(params.sessionId)
+    this.sessions.set(params.sessionId, {
+      agent,
+      abortController: null,
+      cwd: params.cwd,
+      createdAt: new Date(),
+      lastUpdated: new Date(),
+      title: null,
+    })
+
+    // Stream conversation history back to the client via session updates.
+    // The SessionManager restores messages into agent.messages on construction.
+    for (const message of agent.messages) {
+      const updateType = message.role === 'user' ? 'user_message_chunk' : 'agent_message_chunk'
+      for (const block of message.content) {
+        if (block.type === 'textBlock') {
+          await this.connection.sessionUpdate({
+            sessionId: params.sessionId,
+            update: { sessionUpdate: updateType, content: { type: 'text', text: block.text } },
+          })
+        }
+      }
+    }
+
+    return {}
   }
 
   async authenticate(_params: acp.AuthenticateRequest): Promise<acp.AuthenticateResponse> {
@@ -113,6 +141,8 @@ export class AcpAgent implements acp.Agent {
   async resumeSession(params: acp.ResumeSessionRequest): Promise<acp.ResumeSessionResponse> {
     const session = this.sessions.get(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
+    // Create a fresh agent for this session. The SessionManager plugin will
+    // auto-restore conversation state on the first stream/invoke call.
     session.agent = this.agentFactory(params.sessionId)
     return {}
   }
@@ -125,6 +155,9 @@ export class AcpAgent implements acp.Agent {
     session.abortController = new AbortController()
     const { signal } = session.abortController
 
+    // Only text content is currently supported. The Strands Agent's stream()
+    // method accepts a string argument, so non-text content types (images,
+    // tool results, etc.) cannot be forwarded and are filtered out here.
     const text = params.prompt
       .filter((c) => c.type === 'text')
       .map((c) => (c as acp.TextContent & { type: 'text' }).text)
@@ -168,7 +201,20 @@ export class AcpAgent implements acp.Agent {
             break
           }
           case 'beforeToolCallEvent': {
-            if (currentToolCallId === event.toolUse.toolUseId) break
+            // Guard against duplicate tool_call notifications: if
+            // modelContentBlockStartEvent already emitted a tool_call for this
+            // same toolUseId, send an update with the input instead.
+            if (currentToolCallId === event.toolUse.toolUseId) {
+              await this.connection.sessionUpdate({
+                sessionId: params.sessionId,
+                update: {
+                  sessionUpdate: 'tool_call_update',
+                  toolCallId: event.toolUse.toolUseId,
+                  rawInput: event.toolUse.input,
+                },
+              })
+              break
+            }
             currentToolCallId = event.toolUse.toolUseId
             await this.connection.sessionUpdate({
               sessionId: params.sessionId,
@@ -178,7 +224,7 @@ export class AcpAgent implements acp.Agent {
                 title: event.toolUse.name,
                 kind: 'execute',
                 status: 'in_progress',
-                rawInput: {},
+                rawInput: event.toolUse.input,
               },
             })
             break

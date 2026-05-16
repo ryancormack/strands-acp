@@ -102,7 +102,7 @@ describe('AcpAgent', () => {
     })
 
     expect(response.protocolVersion).toBe(PROTOCOL_VERSION)
-    expect(response.agentCapabilities?.loadSession).toBe(false)
+    expect(response.agentCapabilities?.loadSession).toBe(true)
     expect(response.agentCapabilities?.sessionCapabilities?.close).toEqual({})
     expect(response.agentCapabilities?.sessionCapabilities?.list).toEqual({})
     expect(response.agentCapabilities?.sessionCapabilities?.resume).toEqual({})
@@ -259,6 +259,7 @@ describe('AcpAgent', () => {
   // -----------------------------------------------------------------------
 
   it('cancel aborts in-progress prompt', async () => {
+    // Create a mock agent whose stream yields events slowly
     let resolveBlock: (() => void) | undefined
     const blockPromise = new Promise<void>((r) => {
       resolveBlock = r
@@ -559,11 +560,11 @@ describe('AcpAgent', () => {
       },
       {
         type: 'beforeToolCallEvent',
-        toolUse: { toolUseId: 'dup-tool-1', name: 'dupTool', input: {} },
+        toolUse: { toolUseId: 'dup-tool-1', name: 'dupTool', input: { key: 'value' } },
       },
       {
         type: 'afterToolCallEvent',
-        toolUse: { toolUseId: 'dup-tool-1', name: 'dupTool', input: {} },
+        toolUse: { toolUseId: 'dup-tool-1', name: 'dupTool', input: { key: 'value' } },
       },
     ]
 
@@ -592,7 +593,7 @@ describe('AcpAgent', () => {
       const toolUpdates = client.updates.filter(
         (u) => u.update && 'sessionUpdate' in u.update && u.update.sessionUpdate === 'tool_call_update',
       )
-      expect(toolUpdates).toHaveLength(1)
+      expect(toolUpdates).toHaveLength(2)
     })
 
     // Only one tool_call notification should be emitted, not two
@@ -601,6 +602,13 @@ describe('AcpAgent', () => {
     )
     expect(toolCalls).toHaveLength(1)
     expect((toolCalls[0].update as any).toolCallId).toBe('dup-tool-1')
+
+    // The first tool_call_update carries the rawInput from beforeToolCallEvent
+    const toolUpdates = client.updates.filter(
+      (u) => u.update && 'sessionUpdate' in u.update && u.update.sessionUpdate === 'tool_call_update',
+    )
+    expect((toolUpdates[0].update as any).rawInput).toEqual({ key: 'value' })
+    expect((toolUpdates[1].update as any).status).toBe('completed')
   })
 
   // -----------------------------------------------------------------------
@@ -755,5 +763,97 @@ describe('AcpAgent', () => {
     expect(factory).toHaveBeenCalledTimes(2)
     expect(factory).toHaveBeenNthCalledWith(1, session.sessionId)
     expect(factory).toHaveBeenNthCalledWith(2, session.sessionId)
+  })
+
+  // -----------------------------------------------------------------------
+  // loadSession - streams conversation history
+  // -----------------------------------------------------------------------
+
+  it('loadSession restores session and streams history back', async () => {
+    const factory = (_sessionId: string) => {
+      const agent = createMockAgent()
+      // Simulate restored messages
+      ;(agent as any).messages = [
+        { role: 'user', content: [{ type: 'textBlock', text: 'Hello' }] },
+        { role: 'assistant', content: [{ type: 'textBlock', text: 'Hi there!' }] },
+      ]
+      return agent
+    }
+
+    const client = new TestClient()
+    const { clientConn } = createConnectionPair(factory, client)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    await clientConn.loadSession({
+      sessionId: 'existing-session-123',
+      cwd: '/test',
+      mcpServers: [],
+    })
+
+    await vi.waitFor(() => {
+      expect(client.updates).toHaveLength(2)
+    })
+
+    expect((client.updates[0].update as any).sessionUpdate).toBe('user_message_chunk')
+    expect((client.updates[0].update as any).content.text).toBe('Hello')
+    expect((client.updates[1].update as any).sessionUpdate).toBe('agent_message_chunk')
+    expect((client.updates[1].update as any).content.text).toBe('Hi there!')
+  })
+
+  // -----------------------------------------------------------------------
+  // rawInput forwarding in tool_call
+  // -----------------------------------------------------------------------
+
+  it('prompt forwards structured tool input as rawInput', async () => {
+    const toolInput = { file_path: '/src/main.ts', content: 'hello' }
+    const toolEvents = [
+      {
+        type: 'beforeToolCallEvent',
+        toolUse: { toolUseId: 'tool-input-1', name: 'writeFile', input: toolInput },
+      },
+      {
+        type: 'afterToolCallEvent',
+        toolUse: { toolUseId: 'tool-input-1', name: 'writeFile', input: toolInput },
+      },
+    ]
+
+    const agent = createMockAgent(toolEvents)
+    const client = new TestClient()
+    const { clientConn } = createConnectionPair((_sessionId: string) => agent, client)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+      },
+    })
+
+    const session = await clientConn.newSession({
+      cwd: '/test',
+      mcpServers: [],
+    })
+
+    await clientConn.prompt({
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'Write a file' }],
+    })
+
+    await vi.waitFor(() => {
+      const toolCalls = client.updates.filter(
+        (u) => u.update && 'sessionUpdate' in u.update && u.update.sessionUpdate === 'tool_call',
+      )
+      expect(toolCalls).toHaveLength(1)
+    })
+
+    const toolCall = client.updates.find(
+      (u) => u.update && 'sessionUpdate' in u.update && u.update.sessionUpdate === 'tool_call',
+    )
+    expect((toolCall!.update as any).rawInput).toEqual(toolInput)
   })
 })

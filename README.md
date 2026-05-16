@@ -44,12 +44,36 @@ Creates an ACP stdio server bridging a Strands Agent to the Agent Client Protoco
 
 The core class that implements the `acp.Agent` interface, translating ACP requests into Strands agent interactions. It handles:
 
-- Session lifecycle (create, list, resume, close)
+- Session lifecycle (create, list, resume, close, loadSession)
 - Prompt streaming with text and tool call events
 - Cancellation
 - Stop reason mapping between Strands and ACP conventions
 
 You typically do not instantiate `AcpAgent` directly. Use `createStdioServer` for the standard transport, or create a custom transport by passing an `AcpAgent` to an `AgentSideConnection`.
+
+## Session Management
+
+### Loading Previous Sessions
+
+The `loadSession` capability allows clients to restore a previously persisted session. When a client calls `loadSession` with a known `sessionId`, the agent factory is invoked with that ID, and the full conversation history stored in the agent's `messages` array is streamed back to the client as `user_message_chunk` and `agent_message_chunk` session updates.
+
+This enables clients to display the prior conversation context without re-prompting the agent.
+
+### Session Persistence
+
+The `agentFactory` function receives a `sessionId` that can be used to restore conversation state. If your agent implementation uses a persistence layer (e.g., a SessionManager plugin), it can reload the agent's `messages` array from storage when constructed with an existing session ID. The `loadSession` method then iterates those messages and replays the history back to the client.
+
+On `resumeSession`, a fresh agent is created for the same session ID. The SessionManager plugin will auto-restore conversation state on the first `stream` or `invoke` call.
+
+## Tool Call Handling
+
+### Structured Input Forwarding
+
+Tool calls forward the structured input from the model via the `rawInput` field. When a `beforeToolCallEvent` fires, the `tool_call` notification includes `rawInput` set to `event.toolUse.input`, giving clients full visibility into the parameters passed to the tool.
+
+### Deduplication
+
+When both `modelContentBlockStartEvent` and `beforeToolCallEvent` fire for the same tool use ID, only one `tool_call` notification is emitted (from the stream event). The subsequent `beforeToolCallEvent` sends a `tool_call_update` carrying the `rawInput` instead of emitting a duplicate `tool_call`.
 
 ## Development
 
