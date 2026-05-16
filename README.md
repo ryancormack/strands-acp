@@ -59,7 +59,7 @@ The `capabilities` field lets you override the defaults advertised during initia
 
 ```ts
 {
-  loadSession: false,
+  loadSession: true,
   sessionCapabilities: { close: {}, list: {}, resume: {} },
   promptCapabilities: { image: true },
 }
@@ -75,6 +75,47 @@ The bridge automatically maps ACP content blocks to Strands types:
   - ACP `image` blocks (base64 data + mimeType) become `ImageBlock` instances
 
 This means your agent can receive multimodal input when the client sends image content.
+
+### Session Management
+
+When `loadSession: true` is advertised (the default), clients can call `loadSession` with a known `sessionId` to restore a previous session.
+
+**How it works:**
+
+1. The `agentFactory` is called with the given `sessionId`.
+2. The resulting agent's `messages` array (containing conversation history) is streamed back to the client as `user_message_chunk` and `agent_message_chunk` session updates.
+
+**Session persistence pattern:**
+
+The agent factory is responsible for restoring conversation state when given a known `sessionId`. For example, you can use a `SessionManager` plugin that loads messages from a persistent store:
+
+```ts
+const config: AcpBridgeConfig = {
+  agentFactory: (sessionId) => {
+    // The agent restores its messages from a persistent store
+    return agent({
+      model: myModel,
+      tools: myTools,
+      sessionManager: new PersistentSessionManager(sessionId),
+    })
+  },
+}
+```
+
+### Tool Call Handling
+
+#### rawInput forwarding
+
+When a tool call begins via `beforeToolCallEvent`, the full structured input from the agent (the tool's parsed arguments) is forwarded as `rawInput` in the `tool_call` notification. This allows clients to display tool parameters immediately without waiting for the tool to complete.
+
+#### Deduplication
+
+When the agent's stream emits both a `modelContentBlockStartEvent` (indicating a tool use is starting) and a `beforeToolCallEvent` for the same tool call ID, only one `tool_call` notification is sent to the client:
+
+1. The initial `tool_call` notification (from `modelContentBlockStartEvent`) is sent with empty `rawInput`, since the full input is not yet available at stream start time.
+2. When `beforeToolCallEvent` fires with the complete input, a `tool_call_update` is sent containing the full `rawInput`.
+
+This ensures clients receive exactly one `tool_call` per invocation while still getting access to the complete tool parameters via the subsequent update.
 
 ## API
 
