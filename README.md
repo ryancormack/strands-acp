@@ -1,6 +1,14 @@
 # strands-acp
 
+[![npm version](https://img.shields.io/npm/v/strands-acp.svg)](https://www.npmjs.com/package/strands-acp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Bridge any [Strands](https://github.com/strands-agents/sdk-typescript) agent to the [Agent Client Protocol (ACP)](https://agentclientprotocol.org/).
+
+## Requirements
+
+- Node.js >= 18
+- `@strands-agents/sdk` is a peer dependency and must be installed in your project
 
 ## Installation
 
@@ -8,10 +16,24 @@ Bridge any [Strands](https://github.com/strands-agents/sdk-typescript) agent to 
 pnpm add strands-acp @agentclientprotocol/sdk
 ```
 
+Or using npm:
+
+```bash
+npm install strands-acp @agentclientprotocol/sdk
+```
+
+Or using yarn:
+
+```bash
+yarn add strands-acp @agentclientprotocol/sdk
+```
+
 > **Note:** `@strands-agents/sdk` is a peer dependency. Make sure it is installed in your project:
 >
 > ```bash
 > pnpm add @strands-agents/sdk
+> # or: npm install @strands-agents/sdk
+> # or: yarn add @strands-agents/sdk
 > ```
 
 ## Usage
