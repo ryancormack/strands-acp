@@ -1,0 +1,25 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "Harden the existing publish.yml workflow with security best practices: pin all GitHub Actions to full SHA hashes (latest versions) instead of mutable tags, pin pnpm to a specific version instead of 'latest', and keep the existing permissions block.",
+  "status": "in_progress",
+  "steps": [
+    "In .github/workflows/publish.yml, replace 'actions/checkout@v4' with 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1'",
+    "Replace 'actions/setup-node@v4' with 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0'",
+    "Replace 'pnpm/action-setup@v4' with 'pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0'",
+    "Change 'version: latest' under pnpm/action-setup to 'version: 9' (deterministic, avoids surprise breakage from new major versions)",
+    "NOTE: Do NOT add NODE_AUTH_TOKEN - the workflow uses NPM trusted publishing via OIDC (id-token: write). This is the correct, secure approach already in place.",
+    "Keep the existing permissions block (contents: read, id-token: write) - it is correct for trusted publishing"
+  ],
+  "acceptance_criteria": [
+    "All actions in publish.yml use full 40-character SHA pinning with a comment showing the version tag",
+    "pnpm version is pinned to a specific major version (not 'latest')",
+    "No NODE_AUTH_TOKEN is added - trusted publishing via OIDC is already the correct approach",
+    "The workflow YAML is valid"
+  ],
+  "verification": [
+    "Read .github/workflows/publish.yml and confirm all 'uses:' lines have SHA-pinned references with version comments"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
