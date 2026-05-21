@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "fix",
   "description": "Harden the existing publish.yml workflow with security best practices: pin all GitHub Actions to full SHA hashes (latest versions) instead of mutable tags, pin pnpm to a specific version instead of 'latest', and keep the existing permissions block.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "In .github/workflows/publish.yml, replace 'actions/checkout@v4' with 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1'",
     "Replace 'actions/setup-node@v4' with 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0'",
@@ -21,5 +21,5 @@
     "Read .github/workflows/publish.yml and confirm all 'uses:' lines have SHA-pinned references with version comments"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "All three actions pinned to SHA with version comments. pnpm version set to 9. No NODE_AUTH_TOKEN added - trusted publishing via OIDC already in place. YAML validated."
 }
