@@ -1,5 +1,5 @@
 {
-  "name": "strands-acp",
+  "name": "@ryancormack/strands-acp",
   "version": "0.1.0",
   "description": "ACP bridge for Strands agents - expose any Strands agent via the Agent Client Protocol",
   "type": "module",
@@ -18,6 +18,28 @@
     "build": "tsc",
     "test": "vitest run"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryancormack/strands-acp.git"
+  },
+  "homepage": "https://github.com/ryancormack/strands-acp#readme",
+  "bugs": {
+    "url": "https://github.com/ryancormack/strands-acp/issues"
+  },
+  "author": "Ryan Cormack",
+  "keywords": [
+    "strands",
+    "acp",
+    "agent-client-protocol",
+    "agent",
+    "bridge",
+    "mcp",
+    "ai",
+    "llm"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.21.0"
   },
@@ -30,5 +52,8 @@
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
