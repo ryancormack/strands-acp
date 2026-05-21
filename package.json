@@ -1,5 +1,5 @@
 {
-  "name": "strands-acp",
+  "name": "@ryancormack/strands-acp",
   "version": "0.1.0",
   "description": "ACP bridge for Strands agents - expose any Strands agent via the Agent Client Protocol",
   "type": "module",

@@ -1,6 +1,6 @@
-# strands-acp
+# @ryancormack/strands-acp
 
-[![npm version](https://img.shields.io/npm/v/strands-acp.svg)](https://www.npmjs.com/package/strands-acp)
+[![npm version](https://img.shields.io/npm/v/@ryancormack/strands-acp.svg)](https://www.npmjs.com/package/@ryancormack/strands-acp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Bridge any [Strands](https://github.com/strands-agents/sdk-typescript) agent to the [Agent Client Protocol (ACP)](https://agentclientprotocol.org/).
@@ -13,19 +13,19 @@ Bridge any [Strands](https://github.com/strands-agents/sdk-typescript) agent to 
 ## Installation
 
 ```bash
-pnpm add strands-acp @agentclientprotocol/sdk
+pnpm add @ryancormack/strands-acp @agentclientprotocol/sdk
 ```
 
 Or using npm:
 
 ```bash
-npm install strands-acp @agentclientprotocol/sdk
+npm install @ryancormack/strands-acp @agentclientprotocol/sdk
 ```
 
 Or using yarn:
 
 ```bash
-yarn add strands-acp @agentclientprotocol/sdk
+yarn add @ryancormack/strands-acp @agentclientprotocol/sdk
 ```
 
 > **Note:** `@strands-agents/sdk` is a peer dependency. Make sure it is installed in your project:
@@ -43,7 +43,7 @@ yarn add strands-acp @agentclientprotocol/sdk
 The simplest way to expose a Strands agent over ACP is with the stdio transport:
 
 ```ts
-import { createStdioServer } from 'strands-acp'
+import { createStdioServer } from '@ryancormack/strands-acp'
 import { agent } from '@strands-agents/sdk'
 
 function createAgent(_sessionId: string) {
@@ -60,7 +60,7 @@ This starts a JSON-RPC server on stdin/stdout that any ACP-compatible client can
 For more control, pass an `AcpBridgeConfig` object. This lets you configure capabilities and receive session parameters in the factory:
 
 ```ts
-import { createStdioServer, type AcpBridgeConfig } from 'strands-acp'
+import { createStdioServer, type AcpBridgeConfig } from '@ryancormack/strands-acp'
 import { agent } from '@strands-agents/sdk'
 
 const config: AcpBridgeConfig = {
