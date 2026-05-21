@@ -1,0 +1,38 @@
+{
+  "id": "FEAT-002",
+  "type": "feat",
+  "description": "Add a CI workflow (.github/workflows/ci.yml) that runs on pull requests and pushes to main. It should: install dependencies, typecheck/build, run tests, and test on multiple Node.js versions (18, 20, 22) to match the engines: >=18 requirement. Also add a dependency-review workflow and a CodeQL security scanning workflow for comprehensive open source project coverage.",
+  "status": "completed",
+  "steps": [
+    "Create .github/workflows/ci.yml:",
+    "  - name: 'CI'",
+    "  - Trigger on: push to main branch, pull_request to main branch",
+    "  - Set top-level permissions: contents: read",
+    "  - Create a job 'ci' that runs on ubuntu-latest with a matrix strategy for node-version: [18, 20, 22]",
+    "  - Steps: (1) actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1, (2) actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 with matrix.node-version, (3) pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0 with version: 9, (4) 'pnpm install --frozen-lockfile', (5) 'pnpm build', (6) 'pnpm test'",
+    "",
+    "Create .github/workflows/dependency-review.yml:",
+    "  - name: 'Dependency Review'",
+    "  - Trigger on: pull_request only",
+    "  - Set top-level permissions: contents: read",
+    "  - Single job with steps: (1) actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1, (2) actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0",
+    "",
+    "Create .github/workflows/codeql.yml:",
+    "  - name: 'CodeQL'",
+    "  - Trigger on: push to main, pull_request to main, schedule (weekly cron, e.g. '0 6 * * 1' for Monday 6am UTC)",
+    "  - Set top-level permissions: contents: read, security-events: write (required for CodeQL to upload results)",
+    "  - Single job with steps: (1) actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1, (2) github/codeql-action/init@f411752efdf656cb71aa17b755b22c890960da1d # v3.35.5 with languages: javascript-typescript, (3) github/codeql-action/autobuild@f411752efdf656cb71aa17b755b22c890960da1d # v3.35.5, (4) github/codeql-action/analyze@f411752efdf656cb71aa17b755b22c890960da1d # v3.35.5"
+  ],
+  "acceptance_criteria": [
+    ".github/workflows/ci.yml exists, triggers on push to main and PR to main, tests Node 18/20/22 via matrix, all actions SHA-pinned, uses --frozen-lockfile, permissions: contents: read",
+    ".github/workflows/dependency-review.yml exists, triggers on pull_request, SHA-pinned action, permissions: contents: read",
+    ".github/workflows/codeql.yml exists, triggers on push/PR/schedule, SHA-pinned actions, permissions include security-events: write, analyzes javascript-typescript",
+    "All workflow YAML files are syntactically valid"
+  ],
+  "verification": [
+    "Read all three new workflow files and confirm they match the acceptance criteria",
+    "Run 'pnpm install --frozen-lockfile && pnpm build && pnpm test' locally to confirm the CI commands work"
+  ],
+  "blocked_reason": null,
+  "findings": "All 3 workflows created with SHA-pinned actions. Build passes. Tests have pre-existing failures on Node 18 due to missing globalThis.crypto (25/31 fail), unrelated to workflow changes - confirmed by running tests without changes. Tests pass on Node 20+."
+}

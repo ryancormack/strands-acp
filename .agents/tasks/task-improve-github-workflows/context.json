@@ -1,0 +1,29 @@
+{
+  "project_type": "TypeScript open source npm package (@ryancormack/strands-acp)",
+  "language": "TypeScript",
+  "build_system": "pnpm with tsc (pnpm build -> tsc)",
+  "test_framework": "vitest (pnpm test -> vitest run), tests in src/__tests__/",
+  "build_command": "pnpm build",
+  "test_command": "pnpm test",
+  "verification_instructions": "1. Run pnpm install, 2. Run pnpm build, 3. Run pnpm test - all should pass",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "pnpm install",
+  "environment_constraints": "OPEN_INTERNET network mode. No gh CLI available. Git operations work.",
+  "contribution_requirements": "No CONTRIBUTING.md found. README has Development section: pnpm install, pnpm run build, pnpm test.",
+  "key_patterns": "Single package workspace. Node >=18 engine requirement. Uses ESM (type: module). Trusted publishing to npm via OIDC (id-token: write permission). pnpm-workspace.yaml with allowBuilds for esbuild.",
+  "relevant_files": [
+    ".github/workflows/publish.yml",
+    "package.json",
+    "tsconfig.json",
+    "vitest.config.ts",
+    "pnpm-workspace.yaml"
+  ],
+  "directory_structure": "Root level project with src/ (source + tests), dist/ (build output, gitignored), .github/workflows/ (CI/CD)",
+  "pinned_action_shas": {
+    "actions/checkout@v4.3.1": "34e114876b0b11c390a56381ad16ebd13914f8d5",
+    "actions/setup-node@v4.4.0": "49933ea5288caeca8642d1e84afbd3f7d6820020",
+    "pnpm/action-setup@v4.4.0": "fc06bc1257f339d1d5d8b3a19a8cae5388b55320",
+    "actions/dependency-review-action@v4.9.0": "2031cfc080254a8a887f58cffee85186f0e49e48",
+    "github/codeql-action@v3.35.5": "f411752efdf656cb71aa17b755b22c890960da1d"
+  }
+}
