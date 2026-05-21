@@ -22,6 +22,4 @@ jobs:
         with:
           languages: javascript-typescript
 
-      - uses: github/codeql-action/autobuild@f411752efdf656cb71aa17b755b22c890960da1d # v3.35.5
-
       - uses: github/codeql-action/analyze@f411752efdf656cb71aa17b755b22c890960da1d # v3.35.5
