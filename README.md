@@ -105,7 +105,7 @@ When `loadSession: true` is advertised (the default), clients can call `loadSess
 **How it works:**
 
 1. The `agentFactory` is called with the given `sessionId`.
-2. The resulting agent's `messages` array (containing conversation history) is streamed back to the client as `user_message_chunk` and `agent_message_chunk` session updates.
+2. The resulting agent's `messages` array is streamed back to the client. Text, images, and tool calls are all replayed, so the restored transcript keeps the images the user sent and the tools the agent ran.
 
 **Session persistence pattern:**
 
@@ -126,18 +126,103 @@ const config: AcpBridgeConfig = {
 
 ### Tool Call Handling
 
+#### Tool kinds
+
+ACP clients use a tool's `kind` to choose an icon and decide how to render
+progress — an `edit` renders a diff, a `read` renders a file link. The kind is
+inferred from the tool name, and falls back to `other` (the ACP default) rather
+than mislabelling everything as `execute`:
+
+| Tool name pattern | Kind |
+| --- | --- |
+| `file_read`, `cat`, `view` | `read` |
+| `file_write`, `apply_patch`, `str_replace` | `edit` |
+| `delete_file`, `rm` | `delete` |
+| `move_file`, `rename` | `move` |
+| `grep`, `glob`, `find` | `search` |
+| `web_search`, `http_request` | `fetch` |
+| `bash`, `run_command`, `python` | `execute` |
+| `think`, `plan` | `think` |
+
+Override the inference for any tool:
+
+```ts
+createStdioServer({
+  agentFactory: createAgent,
+  toolKinds: { calculate_tax: 'other', my_editor: 'edit' },
+})
+```
+
+#### Locations
+
+File-oriented tool calls (`read`, `edit`, `delete`, `move`) carry `locations`
+extracted from the tool input, so the editor can follow along with the agent.
+A `path` argument on a shell command is not reported as a file location.
+
 #### rawInput forwarding
 
-When a tool call begins via `beforeToolCallEvent`, the full structured input from the agent (the tool's parsed arguments) is forwarded as `rawInput` in the `tool_call` notification. This allows clients to display tool parameters immediately without waiting for the tool to complete.
+When a tool call begins via `beforeToolCallEvent`, the full structured input from
+the agent is forwarded as `rawInput`, so clients can display tool parameters
+immediately without waiting for the tool to complete.
 
 #### Deduplication
 
-When the agent's stream emits both a `modelContentBlockStartEvent` (indicating a tool use is starting) and a `beforeToolCallEvent` for the same tool call ID, only one `tool_call` notification is sent to the client:
+When the agent's stream emits both a `modelContentBlockStartEvent` and a
+`beforeToolCallEvent` for the same tool call id, only one `tool_call`
+notification is sent: the initial one with empty `rawInput`, followed by a
+`tool_call_update` carrying the complete input.
 
-1. The initial `tool_call` notification (from `modelContentBlockStartEvent`) is sent with empty `rawInput`, since the full input is not yet available at stream start time.
-2. When `beforeToolCallEvent` fires with the complete input, a `tool_call_update` is sent containing the full `rawInput`.
+#### Results and failures
 
-This ensures clients receive exactly one `tool_call` per invocation while still getting access to the complete tool parameters via the subsequent update.
+`afterToolCallEvent` carries an `error` when the tool threw. Failures are
+reported as `status: 'failed'`, not `completed`, and the tool result is forwarded
+as `content` so the client has something to render.
+
+### Permissions
+
+By default the bridge does not gate tool calls, which keeps existing setups
+working unchanged. Supply a `permissions` policy to have the agent ask the client
+before it acts:
+
+```ts
+createStdioServer({
+  agentFactory: createAgent,
+  permissions: {
+    default: 'ask',
+    tools: { file_read: 'allow', delete_file: 'deny' },
+  },
+})
+```
+
+Each decision is one of:
+
+- `allow` — run without asking.
+- `ask` — send `session/request_permission` and wait for the user.
+- `deny` — refuse without asking the client.
+
+The client is offered the four ACP option kinds (`allow_once`, `allow_always`,
+`reject_once`, `reject_always`). An `allow_always` or `reject_always` answer is
+remembered for the rest of the session, so the user is asked once per tool.
+
+A rejection does not end the turn. The tool is skipped and the model receives an
+error result for that call, so it can explain itself or try another approach. An
+unrecognised option id fails closed.
+
+This works because `agent.stream()` is an async generator: the agent is suspended
+at the `beforeToolCallEvent` yield while the permission request is in flight, so
+the round-trip can take as long as the user needs, and setting the event's
+`cancel` field before resuming makes the agent skip the call. No timeout of the
+bridge's own is imposed.
+
+### Reasoning
+
+Reasoning deltas are sent as `agent_thought_chunk` rather than mixed into the
+assistant message, so clients can collapse them separately from the answer.
+
+### Cancellation
+
+`session/cancel` aborts the in-flight prompt and releases the agent's stream, so
+the agent's own cleanup runs rather than being left pending.
 
 ## API
 
@@ -154,11 +239,20 @@ Creates an ACP stdio server bridging a Strands Agent to the Agent Client Protoco
 interface AcpBridgeConfig {
   agentFactory: (sessionId: string, sessionParams: NewSessionRequest) => Agent
   capabilities?: Partial<AgentCapabilities>
+  toolKinds?: Record<string, ToolKind>
+  permissions?: PermissionPolicy
+}
+
+interface PermissionPolicy {
+  default?: 'allow' | 'ask' | 'deny'
+  tools?: Record<string, 'allow' | 'ask' | 'deny'>
 }
 ```
 
-- **agentFactory** - Called for each new session and on resume. Receives the session ID and the full `NewSessionRequest` params (cwd, mcpServers, etc.).
-- **capabilities** - Optional partial capabilities merged with defaults and advertised in the `initialize` response.
+- **agentFactory** — called for each new session and on resume. Receives the session id and the full `NewSessionRequest` params (cwd, mcpServers, etc.).
+- **capabilities** — optional partial capabilities merged with defaults and advertised in the `initialize` response.
+- **toolKinds** — explicit tool-name to ACP tool-kind mapping. Any tool not listed has its kind inferred from its name.
+- **permissions** — tool-call approval policy. Omitted means never ask.
 
 ### `AcpAgent`
 
