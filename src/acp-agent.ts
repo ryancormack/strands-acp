@@ -2,6 +2,20 @@ import * as acp from '@agentclientprotocol/sdk'
 
 import { TextBlock, ImageBlock, type Agent } from '@strands-agents/sdk'
 import type { ImageFormat } from '@strands-agents/sdk'
+import {
+  inferToolKind,
+  extractLocations,
+  mapStopReason,
+  mapToolResultContent,
+  SUPPORTED_IMAGE_FORMATS,
+} from './mapping.js'
+import {
+  resolveDecision,
+  interpretPermissionResponse,
+  PERMISSION_OPTIONS,
+  type PermissionPolicy,
+  type PermissionDecision,
+} from './permissions.js'
 
 /**
  * Configuration for the ACP bridge.
@@ -11,10 +25,25 @@ export interface AcpBridgeConfig {
   agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
   /** Optional capabilities to advertise during initialization. Merged with defaults. */
   capabilities?: Partial<acp.AgentCapabilities>
+  /**
+   * Explicit tool-name to ACP tool-kind mapping. Any tool not listed here has
+   * its kind inferred from its name. Kinds drive client icons and rendering.
+   */
+  toolKinds?: Record<string, acp.ToolKind>
+  /**
+   * Tool-call approval policy. When a tool resolves to `'ask'`, the client is
+   * asked via `session/request_permission` before the tool runs and a rejection
+   * is returned to the model as a tool error.
+   *
+   * Omitted means never ask, which preserves the previous behaviour.
+   */
+  permissions?: PermissionPolicy
 }
 
 interface Session {
   agent: Agent
+  /** Decisions remembered from `allow_always` / `reject_always` answers. */
+  permissionOverrides: Map<string, PermissionDecision>
   abortController: AbortController | null
   cwd: string
   createdAt: Date
@@ -32,30 +61,10 @@ function generateSessionId(): string {
 /** Normalize a path by stripping trailing slashes (preserving bare '/'). */
 const normalizePath = (p: string) => p.replace(/\/+$/, '') || '/'
 
-function mapStopReason(strandsReason: string): acp.PromptResponse['stopReason'] {
-  switch (strandsReason) {
-    case 'endTurn':
-      return 'end_turn'
-    case 'maxTokens':
-      return 'max_tokens'
-    case 'cancelled':
-      return 'cancelled'
-    case 'contentFiltered':
-    case 'guardrailIntervened':
-      return 'refusal'
-    case 'toolUse':
-      return 'end_turn'
-    default:
-      return 'end_turn'
-  }
-}
-
-const SUPPORTED_IMAGE_FORMATS: readonly string[] = ['png', 'jpg', 'jpeg', 'gif', 'webp']
-
 /** Extract ImageFormat from a MIME type string (e.g., 'image/png' -> 'png'). Throws for unsupported formats. */
 function extractImageFormat(mimeType: string): ImageFormat {
   const format = mimeType.replace(/^image\//, '')
-  if (!SUPPORTED_IMAGE_FORMATS.includes(format)) {
+  if (!(SUPPORTED_IMAGE_FORMATS as readonly string[]).includes(format)) {
     throw new Error(
       `Unsupported image format: '${mimeType}'. Supported formats: ${SUPPORTED_IMAGE_FORMATS.join(', ')}`,
     )
@@ -68,6 +77,8 @@ export class AcpAgent implements acp.Agent {
   private sessions = new Map<string, Session>()
   private agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
   private capabilitiesConfig: Partial<acp.AgentCapabilities> | undefined
+  private toolKinds: Record<string, acp.ToolKind> | undefined
+  private permissions: PermissionPolicy | undefined
 
   constructor(
     connection: acp.AgentSideConnection,
@@ -78,9 +89,13 @@ export class AcpAgent implements acp.Agent {
       // Backwards-compatible: simple factory function (ignores second param)
       this.agentFactory = (sessionId: string, _sessionParams: acp.NewSessionRequest) => config(sessionId)
       this.capabilitiesConfig = undefined
+      this.toolKinds = undefined
+      this.permissions = undefined
     } else {
       this.agentFactory = config.agentFactory
       this.capabilitiesConfig = config.capabilities
+      this.toolKinds = config.toolKinds
+      this.permissions = config.permissions
     }
   }
 
@@ -124,6 +139,7 @@ export class AcpAgent implements acp.Agent {
     const sessionId = generateSessionId()
     this.sessions.set(sessionId, {
       agent: this.agentFactory(sessionId, params),
+      permissionOverrides: new Map(),
       abortController: null,
       cwd: params.cwd,
       createdAt: new Date(),
@@ -139,6 +155,7 @@ export class AcpAgent implements acp.Agent {
     const agent = this.agentFactory(params.sessionId, sessionParams)
     this.sessions.set(params.sessionId, {
       agent,
+      permissionOverrides: new Map(),
       abortController: null,
       cwd: params.cwd,
       createdAt: new Date(),
@@ -147,20 +164,160 @@ export class AcpAgent implements acp.Agent {
       params: sessionParams,
     })
 
-    // Stream conversation history back to the client via session updates.
+    // Replay conversation history to the client via session updates.
+    await this.replayHistory(params.sessionId, agent)
+
+    return {}
+  }
+
+  /**
+   * Replays a restored conversation to the client.
+   *
+   * Text, images, and tool calls are all forwarded. Replaying only text would
+   * leave the client's transcript missing the images the user sent and every
+   * tool the agent ran, which is the visible half of an agentic session.
+   */
+  private async replayHistory(sessionId: string, agent: Agent): Promise<void> {
     for (const message of agent.messages) {
       const updateType = message.role === 'user' ? 'user_message_chunk' : 'agent_message_chunk'
+
       for (const block of message.content) {
         if (block.type === 'textBlock') {
           await this.connection.sessionUpdate({
-            sessionId: params.sessionId,
+            sessionId,
             update: { sessionUpdate: updateType, content: { type: 'text', text: block.text } },
+          })
+        } else if (block.type === 'imageBlock') {
+          const image = block as unknown as { format?: string; source?: { bytes?: Uint8Array } }
+          const bytes = image.source?.bytes
+          if (!bytes) continue
+          await this.connection.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: updateType,
+              content: {
+                type: 'image',
+                mimeType: `image/${image.format ?? 'png'}`,
+                data: Buffer.from(bytes).toString('base64'),
+              },
+            },
+          })
+        } else if (block.type === 'toolUseBlock') {
+          const toolUse = block as unknown as { toolUseId: string; name: string; input?: unknown }
+          const kind = inferToolKind(toolUse.name, this.toolKinds)
+          await this.connection.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: toolUse.toolUseId,
+              title: toolUse.name,
+              kind,
+              status: 'completed',
+              rawInput: (toolUse.input ?? {}) as Record<string, unknown>,
+              locations: extractLocations(toolUse.input, kind),
+            },
           })
         }
       }
     }
+  }
 
-    return {}
+  /**
+   * Asks the client whether a tool call may proceed, when policy requires it.
+   *
+   * The agent is suspended at the `beforeToolCallEvent` yield for the duration,
+   * so this can block on a human without any timeout of its own. On refusal the
+   * event's `cancel` field is set, which the agent reads on resumption and turns
+   * into an error tool result the model can react to.
+   *
+   * @returns `'allowed'`, `'denied'`, or `'cancelled'` when the client cancelled
+   * the turn rather than answering.
+   */
+  private async gateToolCall(
+    sessionId: string,
+    session: Session,
+    event: { toolUse: { toolUseId: string; name: string; input: unknown }; cancel?: boolean | string },
+    kind: acp.ToolKind,
+    locations: acp.ToolCallLocation[],
+  ): Promise<'allowed' | 'denied' | 'cancelled'> {
+    const decision = resolveDecision(event.toolUse.name, this.permissions, session.permissionOverrides)
+
+    if (decision === 'allow') return 'allowed'
+
+    if (decision === 'deny') {
+      event.cancel = `Tool '${event.toolUse.name}' is not permitted by policy.`
+      await this.connection.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: event.toolUse.toolUseId,
+          title: event.toolUse.name,
+          kind,
+          status: 'failed',
+          rawInput: event.toolUse.input as Record<string, unknown>,
+          ...(locations.length > 0 ? { locations } : {}),
+        },
+      })
+      return 'denied'
+    }
+
+    // 'ask' — announce the pending call so the client can show what it is
+    // approving, then wait for the answer.
+    await this.connection.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: event.toolUse.toolUseId,
+        title: event.toolUse.name,
+        kind,
+        status: 'pending',
+        rawInput: event.toolUse.input as Record<string, unknown>,
+        ...(locations.length > 0 ? { locations } : {}),
+      },
+    })
+
+    const response = await this.connection.requestPermission({
+      sessionId,
+      toolCall: {
+        toolCallId: event.toolUse.toolUseId,
+        title: event.toolUse.name,
+        kind,
+        status: 'pending',
+        rawInput: event.toolUse.input as Record<string, unknown>,
+        ...(locations.length > 0 ? { locations } : {}),
+      },
+      options: [...PERMISSION_OPTIONS],
+    })
+
+    const outcome = interpretPermissionResponse(response)
+    if (outcome.remember) session.permissionOverrides.set(event.toolUse.name, outcome.remember)
+
+    if (outcome.allowed) {
+      await this.connection.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: event.toolUse.toolUseId,
+          status: 'in_progress',
+        },
+      })
+      return 'allowed'
+    }
+
+    event.cancel = outcome.cancelled
+      ? 'The user cancelled this request.'
+      : `The user rejected running '${event.toolUse.name}'.`
+
+    await this.connection.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: event.toolUse.toolUseId,
+        status: 'failed',
+      },
+    })
+
+    return outcome.cancelled ? 'cancelled' : 'denied'
   }
 
   async authenticate(_params: acp.AuthenticateRequest): Promise<acp.AuthenticateResponse> {
@@ -248,9 +405,11 @@ export class AcpAgent implements acp.Agent {
 
     let currentToolCallId: string | undefined
     let agentResult: { stopReason: string } | undefined
+    let cancelledByPermission = false
+
+    const gen = session.agent.stream(invokeArgs)
 
     try {
-      const gen = session.agent.stream(invokeArgs)
       let iterResult = await gen.next()
       while (!iterResult.done) {
         const event = iterResult.value
@@ -267,6 +426,22 @@ export class AcpAgent implements acp.Agent {
                   content: { type: 'text', text: inner.delta.text },
                 },
               })
+            } else if (
+              inner.type === 'modelContentBlockDeltaEvent' &&
+              inner.delta.type === 'reasoningContentDelta'
+            ) {
+              // Reasoning is a distinct update in ACP so clients can collapse it
+              // separately from the answer.
+              const reasoning = inner.delta as unknown as { text?: string }
+              if (reasoning.text) {
+                await this.connection.sessionUpdate({
+                  sessionId: params.sessionId,
+                  update: {
+                    sessionUpdate: 'agent_thought_chunk',
+                    content: { type: 'text', text: reasoning.text },
+                  },
+                })
+              }
             } else if (inner.type === 'modelContentBlockStartEvent' && inner.start?.type === 'toolUseStart') {
               currentToolCallId = inner.start.toolUseId
               await this.connection.sessionUpdate({
@@ -275,7 +450,7 @@ export class AcpAgent implements acp.Agent {
                   sessionUpdate: 'tool_call',
                   toolCallId: inner.start.toolUseId,
                   title: inner.start.name,
-                  kind: 'execute',
+                  kind: inferToolKind(inner.start.name, this.toolKinds),
                   status: 'in_progress',
                   rawInput: {},
                 },
@@ -284,13 +459,38 @@ export class AcpAgent implements acp.Agent {
             break
           }
           case 'beforeToolCallEvent': {
+            const kind = inferToolKind(event.toolUse.name, this.toolKinds)
+            const locations = extractLocations(event.toolUse.input, kind)
+
+            // The agent is suspended at this yield, so the permission round-trip
+            // can take as long as the user needs. Setting `event.cancel` before
+            // resuming the generator makes the agent skip the call and hand the
+            // model an error result instead.
+            const gateOutcome = await this.gateToolCall(
+              params.sessionId,
+              session,
+              event,
+              kind,
+              locations,
+            )
+            if (gateOutcome === 'cancelled') {
+              cancelledByPermission = true
+            }
+            if (gateOutcome !== 'allowed') {
+              currentToolCallId = undefined
+              break
+            }
+
             if (currentToolCallId === event.toolUse.toolUseId) {
+              // The stream already announced this call with an empty input; fill
+              // in the parsed arguments and the locations they resolve to.
               await this.connection.sessionUpdate({
                 sessionId: params.sessionId,
                 update: {
                   sessionUpdate: 'tool_call_update',
                   toolCallId: event.toolUse.toolUseId,
                   rawInput: event.toolUse.input,
+                  ...(locations.length > 0 ? { locations } : {}),
                 },
               })
               break
@@ -302,21 +502,27 @@ export class AcpAgent implements acp.Agent {
                 sessionUpdate: 'tool_call',
                 toolCallId: event.toolUse.toolUseId,
                 title: event.toolUse.name,
-                kind: 'execute',
+                kind,
                 status: 'in_progress',
                 rawInput: event.toolUse.input,
+                ...(locations.length > 0 ? { locations } : {}),
               },
             })
             break
           }
           case 'afterToolCallEvent': {
             if (currentToolCallId) {
+              // `error` is populated when the tool threw. Reporting every call as
+              // completed hides real failures from the client.
+              const failed = event.error !== undefined
+              const content = mapToolResultContent(event.result)
               await this.connection.sessionUpdate({
                 sessionId: params.sessionId,
                 update: {
                   sessionUpdate: 'tool_call_update',
                   toolCallId: currentToolCallId,
-                  status: 'completed',
+                  status: failed ? 'failed' : 'completed',
+                  ...(content.length > 0 ? { content } : {}),
                 },
               })
               currentToolCallId = undefined
@@ -331,13 +537,18 @@ export class AcpAgent implements acp.Agent {
       if (iterResult.done) {
         agentResult = iterResult.value as { stopReason: string }
       }
+      // Releasing the generator runs its `finally` blocks. Breaking out of the
+      // loop on cancellation without this leaves the agent's own cleanup pending.
+      if (!iterResult.done) await gen.return(undefined as never)
     } catch (err) {
+      await gen.return(undefined as never).catch(() => {})
       if (signal.aborted) return { stopReason: 'cancelled' }
       throw err
     }
 
     session.abortController = null
     session.lastUpdated = new Date()
+    if (cancelledByPermission) return { stopReason: 'cancelled' }
     return { stopReason: signal.aborted ? 'cancelled' : mapStopReason(agentResult?.stopReason ?? 'endTurn') }
   }
 

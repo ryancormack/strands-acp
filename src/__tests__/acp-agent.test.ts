@@ -1248,4 +1248,229 @@ describe('AcpAgent', () => {
     const oldFiltered = await clientConn.listSessions({ cwd: '/original' })
     expect(oldFiltered.sessions).toHaveLength(0)
   })
+
+  // -----------------------------------------------------------------------
+  // Tool kinds, locations, failures, and reasoning
+  // -----------------------------------------------------------------------
+
+  it('prompt reports an inferred tool kind rather than always execute', async () => {
+    const input = { path: '/src/main.ts' }
+    const agent = createMockAgent([
+      { type: 'beforeToolCallEvent', toolUse: { toolUseId: 't1', name: 'file_read', input } },
+    ])
+    const { clientConn, client } = createConnectionPair(() => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+    await clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const call = client.updates.find((u) => (u.update as any).sessionUpdate === 'tool_call')
+    expect((call!.update as any).kind).toBe('read')
+    expect((call!.update as any).locations).toEqual([{ path: '/src/main.ts' }])
+  })
+
+  it('prompt reports a failed tool call as failed, not completed', async () => {
+    const toolUse = { toolUseId: 't1', name: 'file_write', input: { path: '/a' } }
+    const agent = createMockAgent([
+      { type: 'beforeToolCallEvent', toolUse },
+      {
+        type: 'afterToolCallEvent',
+        toolUse,
+        error: new Error('permission denied'),
+        result: { content: [{ type: 'textBlock', text: 'permission denied' }] },
+      },
+    ])
+    const { clientConn, client } = createConnectionPair(() => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+    await clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const updates = client.updates.filter(
+      (u) => (u.update as any).sessionUpdate === 'tool_call_update',
+    )
+    const final = updates[updates.length - 1]
+    expect((final.update as any).status).toBe('failed')
+    expect((final.update as any).content).toEqual([
+      { type: 'content', content: { type: 'text', text: 'permission denied' } },
+    ])
+  })
+
+  it('prompt forwards a successful tool result as content', async () => {
+    const toolUse = { toolUseId: 't1', name: 'file_read', input: { path: '/a' } }
+    const agent = createMockAgent([
+      { type: 'beforeToolCallEvent', toolUse },
+      {
+        type: 'afterToolCallEvent',
+        toolUse,
+        result: { content: [{ type: 'textBlock', text: 'file contents' }] },
+      },
+    ])
+    const { clientConn, client } = createConnectionPair(() => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+    await clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const updates = client.updates.filter(
+      (u) => (u.update as any).sessionUpdate === 'tool_call_update',
+    )
+    const final = updates[updates.length - 1]
+    expect((final.update as any).status).toBe('completed')
+    expect((final.update as any).content).toEqual([
+      { type: 'content', content: { type: 'text', text: 'file contents' } },
+    ])
+  })
+
+  it('prompt maps reasoning deltas to agent_thought_chunk', async () => {
+    const agent = createMockAgent([
+      {
+        type: 'modelStreamUpdateEvent',
+        event: {
+          type: 'modelContentBlockDeltaEvent',
+          delta: { type: 'reasoningContentDelta', text: 'thinking about it' },
+        },
+      },
+      {
+        type: 'modelStreamUpdateEvent',
+        event: {
+          type: 'modelContentBlockDeltaEvent',
+          delta: { type: 'textDelta', text: 'the answer' },
+        },
+      },
+    ])
+    const { clientConn, client } = createConnectionPair(() => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+    await clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const thoughts = client.updates.filter(
+      (u) => (u.update as any).sessionUpdate === 'agent_thought_chunk',
+    )
+    const messages = client.updates.filter(
+      (u) => (u.update as any).sessionUpdate === 'agent_message_chunk',
+    )
+    expect((thoughts[0].update as any).content.text).toBe('thinking about it')
+    expect((messages[0].update as any).content.text).toBe('the answer')
+  })
+
+  it('prompt does not report an interrupt as a completed turn', async () => {
+    const agent = createMockAgent([], { stopReason: 'interrupt' })
+    const { clientConn } = createConnectionPair(() => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+    const response = await clientConn.prompt({
+      sessionId,
+      prompt: [{ type: 'text', text: 'go' }],
+    })
+
+    expect(response.stopReason).not.toBe('end_turn')
+  })
+
+  it('loadSession replays images and tool calls, not only text', async () => {
+    const agent = {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'textBlock', text: 'look at this' },
+            { type: 'imageBlock', format: 'png', source: { bytes: new Uint8Array([1, 2, 3]) } },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'toolUseBlock', toolUseId: 'h1', name: 'file_read', input: { path: '/a.ts' } },
+          ],
+        },
+      ],
+      stream: async function* () {
+        return { stopReason: 'endTurn' } as any
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const { clientConn, client } = createConnectionPair(() => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    await clientConn.loadSession({ sessionId: 'restored', cwd: '/p', mcpServers: [] })
+
+    const kinds = client.updates.map((u) => (u.update as any).sessionUpdate)
+    expect(kinds).toContain('user_message_chunk')
+    expect(kinds).toContain('tool_call')
+
+    const image = client.updates.find((u) => (u.update as any).content?.type === 'image')
+    expect((image!.update as any).content.mimeType).toBe('image/png')
+
+    const toolCall = client.updates.find((u) => (u.update as any).sessionUpdate === 'tool_call')
+    expect((toolCall!.update as any).kind).toBe('read')
+    expect((toolCall!.update as any).status).toBe('completed')
+  })
+
+  it('cancel releases the agent stream so its cleanup runs', async () => {
+    let cleanedUp = false
+    const agent = {
+      messages: [],
+      stream: async function* () {
+        try {
+          // Bounded so the test terminates even if cancellation never lands,
+          // with a delay so the cancel notification arrives while suspended
+          // at a yield rather than mid-await.
+          for (let i = 0; i < 50; i++) {
+            yield {
+              type: 'modelStreamUpdateEvent',
+              event: {
+                type: 'modelContentBlockDeltaEvent',
+                delta: { type: 'textDelta', text: 'tick' },
+              },
+            } as any
+            await new Promise((resolve) => setTimeout(resolve, 5))
+          }
+          return { stopReason: 'endTurn' } as any
+        } finally {
+          cleanedUp = true
+        }
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const { clientConn } = createConnectionPair(() => agent)
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+
+    const pending = clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await clientConn.cancel({ sessionId })
+    const response = await pending
+
+    expect(response.stopReason).toBe('cancelled')
+    // Without releasing the generator, this stays false: breaking out of the
+    // consumer loop alone never runs the agent's own cleanup.
+    expect(cleanedUp).toBe(true)
+  })
+
 })
