@@ -233,47 +233,73 @@ export class AcpAgent implements acp.Agent {
    * @returns `'allowed'`, `'denied'`, or `'cancelled'` when the client cancelled
    * the turn rather than answering.
    */
+  /**
+   * Builds a tool-call session update, as either a first announcement or an
+   * update to one already sent.
+   *
+   * ACP expects exactly one `tool_call` per invocation followed by
+   * `tool_call_update`s. The model stream announces a call as soon as it starts,
+   * before the parsed input exists, so by the time the permission gate runs the
+   * client may already know about this `toolCallId`. Sending a second `tool_call`
+   * for it would have the client render the same invocation twice.
+   */
+  private toolCallNotification(
+    event: { toolUse: { toolUseId: string; name: string; input: unknown } },
+    kind: acp.ToolKind,
+    locations: acp.ToolCallLocation[],
+    status: acp.ToolCallStatus,
+    alreadyAnnounced: boolean,
+  ): acp.SessionUpdate {
+    const locationField = locations.length > 0 ? { locations } : {}
+
+    if (alreadyAnnounced) {
+      return {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: event.toolUse.toolUseId,
+        status,
+        rawInput: event.toolUse.input as Record<string, unknown>,
+        ...locationField,
+      }
+    }
+
+    return {
+      sessionUpdate: 'tool_call',
+      toolCallId: event.toolUse.toolUseId,
+      title: event.toolUse.name,
+      kind,
+      status,
+      rawInput: event.toolUse.input as Record<string, unknown>,
+      ...locationField,
+    }
+  }
+
   private async gateToolCall(
     sessionId: string,
     session: Session,
     event: { toolUse: { toolUseId: string; name: string; input: unknown }; cancel?: boolean | string },
     kind: acp.ToolKind,
     locations: acp.ToolCallLocation[],
-  ): Promise<'allowed' | 'denied' | 'cancelled'> {
+    alreadyAnnounced: boolean,
+  ): Promise<{ outcome: 'allowed' | 'denied' | 'cancelled'; announced: boolean }> {
     const decision = resolveDecision(event.toolUse.name, this.permissions, session.permissionOverrides)
 
-    if (decision === 'allow') return 'allowed'
+    // Ungated calls are announced by the caller, exactly as before.
+    if (decision === 'allow') return { outcome: 'allowed', announced: alreadyAnnounced }
 
     if (decision === 'deny') {
       event.cancel = `Tool '${event.toolUse.name}' is not permitted by policy.`
       await this.connection.sessionUpdate({
         sessionId,
-        update: {
-          sessionUpdate: 'tool_call',
-          toolCallId: event.toolUse.toolUseId,
-          title: event.toolUse.name,
-          kind,
-          status: 'failed',
-          rawInput: event.toolUse.input as Record<string, unknown>,
-          ...(locations.length > 0 ? { locations } : {}),
-        },
+        update: this.toolCallNotification(event, kind, locations, 'failed', alreadyAnnounced),
       })
-      return 'denied'
+      return { outcome: 'denied', announced: true }
     }
 
     // 'ask' — announce the pending call so the client can show what it is
     // approving, then wait for the answer.
     await this.connection.sessionUpdate({
       sessionId,
-      update: {
-        sessionUpdate: 'tool_call',
-        toolCallId: event.toolUse.toolUseId,
-        title: event.toolUse.name,
-        kind,
-        status: 'pending',
-        rawInput: event.toolUse.input as Record<string, unknown>,
-        ...(locations.length > 0 ? { locations } : {}),
-      },
+      update: this.toolCallNotification(event, kind, locations, 'pending', alreadyAnnounced),
     })
 
     const response = await this.connection.requestPermission({
@@ -301,7 +327,7 @@ export class AcpAgent implements acp.Agent {
           status: 'in_progress',
         },
       })
-      return 'allowed'
+      return { outcome: 'allowed', announced: true }
     }
 
     event.cancel = outcome.cancelled
@@ -317,7 +343,7 @@ export class AcpAgent implements acp.Agent {
       },
     })
 
-    return outcome.cancelled ? 'cancelled' : 'denied'
+    return { outcome: outcome.cancelled ? 'cancelled' : 'denied', announced: true }
   }
 
   async authenticate(_params: acp.AuthenticateRequest): Promise<acp.AuthenticateResponse> {
@@ -472,14 +498,20 @@ export class AcpAgent implements acp.Agent {
               event,
               kind,
               locations,
+              currentToolCallId === event.toolUse.toolUseId,
             )
-            if (gateOutcome === 'cancelled') {
+            if (gateOutcome.outcome === 'cancelled') {
               cancelledByPermission = true
             }
-            if (gateOutcome !== 'allowed') {
+            if (gateOutcome.outcome !== 'allowed') {
               currentToolCallId = undefined
               break
             }
+
+            // The gate may have owned the first announcement. Either way the
+            // client already knows this id, so send an update, not a second
+            // tool_call.
+            if (gateOutcome.announced) currentToolCallId = event.toolUse.toolUseId
 
             if (currentToolCallId === event.toolUse.toolUseId) {
               // The stream already announced this call with an empty input; fill

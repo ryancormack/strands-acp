@@ -333,4 +333,82 @@ describe('AcpAgent permission gating', () => {
     expect(client.requests[0].toolCall.title).toBe('bash')
     expect(executed).toEqual(['file_read', 'bash'])
   })
+
+  it('sends exactly one tool_call per invocation when the stream already announced it', async () => {
+    // The model stream announces a tool call as soon as it starts, before the
+    // parsed input exists. The permission gate then runs. ACP expects one
+    // tool_call followed by tool_call_updates, so the gate must not announce
+    // the same toolCallId a second time.
+    const executed: string[] = []
+    const client = new PermissionClient(['allow_once'])
+    const toolUse = { toolUseId: 'dup-1', name: 'bash', input: { cmd: 'ls' } }
+
+    const agent = {
+      messages: [],
+      stream: async function* () {
+        // Stream start: the bridge announces the call with empty input.
+        yield {
+          type: 'modelStreamUpdateEvent',
+          event: {
+            type: 'modelContentBlockStartEvent',
+            start: { type: 'toolUseStart', name: toolUse.name, toolUseId: toolUse.toolUseId },
+          },
+        } as never
+        // Then the hook fires, carrying the real input, and the gate runs.
+        const event: Record<string, unknown> = { type: 'beforeToolCallEvent', toolUse }
+        yield event as never
+        if (!event.cancel) executed.push(toolUse.name)
+        yield {
+          type: 'afterToolCallEvent',
+          toolUse,
+          result: { content: [{ type: 'textBlock', text: 'ok' }] },
+        } as never
+        return { stopReason: 'endTurn' } as never
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const clientConn = connect({ agentFactory: () => agent, permissions: { default: 'ask' } }, client)
+    const { sessionId } = await startSession(clientConn)
+    await clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const announces = client.updates.filter(
+      (u) => (u.update as never as { sessionUpdate?: string }).sessionUpdate === 'tool_call',
+    )
+    expect(announces).toHaveLength(1)
+    expect(executed).toEqual(['bash'])
+
+    // The gate's pending state still reaches the client, as an update.
+    const pending = client.updates.filter(
+      (u) => (u.update as never as { status?: string }).status === 'pending',
+    )
+    expect(pending.length).toBeGreaterThan(0)
+    expect(
+      (pending[0].update as never as { sessionUpdate?: string }).sessionUpdate,
+    ).toBe('tool_call_update')
+  })
+
+  it('sends one tool_call when the stream did not announce first', async () => {
+    // Without a preceding stream announcement the gate owns the first
+    // notification, so it must still be a tool_call.
+    const executed: string[] = []
+    const client = new PermissionClient(['allow_once'])
+    const clientConn = connect(
+      {
+        agentFactory: () =>
+          createGatedAgent([{ toolUseId: 't1', name: 'bash', input: {} }], executed),
+        permissions: { default: 'ask' },
+      },
+      client,
+    )
+    const { sessionId } = await startSession(clientConn)
+    await clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const announces = client.updates.filter(
+      (u) => (u.update as never as { sessionUpdate?: string }).sessionUpdate === 'tool_call',
+    )
+    expect(announces).toHaveLength(1)
+    expect(executed).toEqual(['bash'])
+  })
+
 })
