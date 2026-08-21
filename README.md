@@ -124,6 +124,52 @@ const config: AcpBridgeConfig = {
 }
 ```
 
+### Session listing
+
+`session/list` answers "which sessions can I resume?". The bridge only holds live
+sessions in memory, so on its own it can answer that only for sessions the current
+process created: after a restart the list is empty even though the sessions are
+still on disk and still loadable.
+
+Supply a `sessionStore` to close that. It carries the ACP-level record, which is
+the part nothing else persists. A Strands `SessionManager` stores the
+conversation, but `cwd` and `title` are ACP concepts the agent never sees, so they
+cannot be recovered from a snapshot.
+
+```ts
+const config: AcpBridgeConfig = {
+  agentFactory: (sessionId) => createAgent(sessionId),
+  sessionStore: {
+    async list({ cwd }) {
+      const all = await readIndex()
+      return cwd ? all.filter((s) => s.cwd === cwd) : all
+    },
+    async save(info) {
+      await writeIndexEntry(info)
+    },
+  },
+}
+```
+
+`list` receives `cwd` as a hint so a backend that can narrow the read does not
+have to fetch everything. Ignoring it is safe: the bridge applies the same filter
+to whatever comes back, so a store cannot leak sessions from another directory by
+being lazy.
+
+`save` is called when a session is created, loaded, resumed, and after each
+completed turn. Write failures are reported on stderr and swallowed, because a
+metadata write must never fail a user's turn. A `list` failure is not swallowed:
+it propagates as an error, since returning only the live sessions would look to
+the client like an authoritative "no other sessions exist".
+
+Listing merges live and stored sessions, deduplicating by id with the live entry
+winning, and sorts most-recently-updated first.
+
+Titles come from the first prompt in a session that carries text, truncated at a
+word boundary. Nothing else in the bridge knows anything human-readable about a
+session, and a client's session picker needs something to show. A session whose
+first turn was image-only stays untitled.
+
 ### Tool Call Handling
 
 #### Tool kinds
@@ -204,6 +250,16 @@ The client is offered the four ACP option kinds (`allow_once`, `allow_always`,
 `reject_once`, `reject_always`). An `allow_always` or `reject_always` answer is
 remembered for the rest of the session, so the user is asked once per tool.
 
+Remembered answers are held in memory for the lifetime of the live session and
+are deliberately not persisted. Resuming a session with `session/load`, or
+restarting the agent process, starts with an empty set and asks again. The
+workspace may have changed in between, so a decision made against the old state
+should not silently carry over. The `permissions` policy above is the durable
+layer: it is configuration, so it survives restarts by definition, and
+`allow_always` is a within-session convenience on top of it. A client is free to
+persist its own answers and reply without prompting, which ACP permits but does
+not require.
+
 A rejection does not end the turn. The tool is skipped and the model receives an
 error result for that call, so it can explain itself or try another approach. An
 unrecognised option id fails closed.
@@ -253,6 +309,7 @@ interface PermissionPolicy {
 - **capabilities** — optional partial capabilities merged with defaults and advertised in the `initialize` response.
 - **toolKinds** — explicit tool-name to ACP tool-kind mapping. Any tool not listed has its kind inferred from its name.
 - **permissions** — tool-call approval policy. Omitted means never ask.
+- **sessionStore** — durable store for ACP session metadata. Omitted means `session/list` reports only sessions this process created.
 
 ### `AcpAgent`
 
@@ -264,7 +321,54 @@ The core class that implements the `acp.Agent` interface, translating ACP reques
 - Cancellation
 - Stop reason mapping between Strands and ACP conventions
 
+Some of these are narrower than the list suggests. See [Known gaps](#known-gaps).
+
 You typically do not instantiate `AcpAgent` directly. Use `createStdioServer` for the standard transport, or create a custom transport by passing an `AcpAgent` to an `AgentSideConnection`.
+
+## Known gaps
+
+Things that are deliberately unfinished or narrower than they look. Each needs
+closing before this becomes a first-party SDK feature.
+
+**Session modes are accepted and ignored.** `setSessionMode` returns an empty
+response without changing anything. No modes are advertised, so a conforming
+client has nothing to switch to and will not call it, but if modes are ever
+advertised the method will silently accept a mode change and do nothing. Modes
+are ACP's standardised lever for persistent policy, so the natural
+implementation is to map a mode onto a `PermissionPolicy` and swap the active
+policy. Until then a client cannot express "plan mode denies every mutating
+tool".
+
+**`authenticate` always succeeds.** It returns an empty response without
+checking anything. No `authMethods` are advertised, so a client should never
+call it, but the default fails open rather than closed. An agent that needs
+authentication must not rely on this method as written.
+
+**`listSessions` needs a `sessionStore` to see past the current process.**
+Without one it iterates the in-memory map only, so it returns an empty list after
+a restart even when sessions are resumable from disk. See
+[Session listing](#session-listing). Upstream this wants a real session
+enumeration API on the SDK: the bridge cannot reach the storage its
+`agentFactory` uses, and the on-disk key layout is an SDK internal it should not
+be parsing.
+
+**`loadSession` and `resumeSession` are not symmetric.** `loadSession` builds a
+fresh session and replays history to the client. `resumeSession` requires the
+session to already be in memory, rebuilds the agent from the factory, and does
+not replay. The agent therefore holds history the client's transcript may not
+show. This may be correct, since a client resuming an in-memory session
+plausibly still has the transcript, but the difference is undocumented in ACP
+and untested here.
+
+**`loadSession` restamps timestamps.** `createdAt` and `lastUpdated` are set to
+the load time, not the session's real times, so `listSessions` reports when a
+session was last loaded rather than when it was last used.
+
+**`mcpServers` is forwarded, not honoured.** The bridge passes the client's MCP
+server list to the `agentFactory` and does nothing else with it. Connecting
+those servers is the factory's job. A client that configures MCP servers and
+expects the agent to reach them will see nothing happen unless the factory
+implements it.
 
 ## Development
 

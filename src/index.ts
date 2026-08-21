@@ -14,3 +14,8 @@ export {
   type PermissionDecision,
   type PermissionOutcome,
 } from './permissions.js'
+export {
+  mergeSessionInfos,
+  deriveTitle,
+  type SessionStore,
+} from './session-store.js'
