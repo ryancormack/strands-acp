@@ -16,6 +16,7 @@ import {
   type PermissionPolicy,
   type PermissionDecision,
 } from './permissions.js'
+import { mergeSessionInfos, deriveTitle, type SessionStore } from './session-store.js'
 
 /**
  * Configuration for the ACP bridge.
@@ -38,11 +39,30 @@ export interface AcpBridgeConfig {
    * Omitted means never ask, which preserves the previous behaviour.
    */
   permissions?: PermissionPolicy
+  /**
+   * Durable store for session metadata.
+   *
+   * Without one, `session/list` reports only sessions this process created, so
+   * it returns an empty list after a restart even when sessions are resumable.
+   * With one, stored sessions are merged into the listing and their titles
+   * survive a reload.
+   *
+   * Supplying a store does not make the bridge persist conversation history:
+   * that is the `agentFactory`'s job, normally via a Strands `SessionManager`.
+   * This carries only the ACP-level record the protocol asks for.
+   */
+  sessionStore?: SessionStore
 }
 
 interface Session {
   agent: Agent
-  /** Decisions remembered from `allow_always` / `reject_always` answers. */
+  /**
+   * Decisions remembered from `allow_always` / `reject_always` answers.
+   *
+   * In-memory and intentionally not persisted: a resumed session starts empty
+   * and asks again, because the workspace may have changed since the answer was
+   * given. The configured {@link PermissionPolicy} is the durable layer.
+   */
   permissionOverrides: Map<string, PermissionDecision>
   abortController: AbortController | null
   cwd: string
@@ -57,9 +77,6 @@ function generateSessionId(): string {
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
 }
-
-/** Normalize a path by stripping trailing slashes (preserving bare '/'). */
-const normalizePath = (p: string) => p.replace(/\/+$/, '') || '/'
 
 /** Extract ImageFormat from a MIME type string (e.g., 'image/png' -> 'png'). Throws for unsupported formats. */
 function extractImageFormat(mimeType: string): ImageFormat {
@@ -79,6 +96,7 @@ export class AcpAgent implements acp.Agent {
   private capabilitiesConfig: Partial<acp.AgentCapabilities> | undefined
   private toolKinds: Record<string, acp.ToolKind> | undefined
   private permissions: PermissionPolicy | undefined
+  private sessionStore: SessionStore | undefined
 
   constructor(
     connection: acp.AgentSideConnection,
@@ -91,11 +109,13 @@ export class AcpAgent implements acp.Agent {
       this.capabilitiesConfig = undefined
       this.toolKinds = undefined
       this.permissions = undefined
+      this.sessionStore = undefined
     } else {
       this.agentFactory = config.agentFactory
       this.capabilitiesConfig = config.capabilities
       this.toolKinds = config.toolKinds
       this.permissions = config.permissions
+      this.sessionStore = config.sessionStore
     }
   }
 
@@ -147,6 +167,7 @@ export class AcpAgent implements acp.Agent {
       title: null,
       params,
     })
+    await this.persistSession(sessionId, this.sessions.get(sessionId)!)
     return { sessionId }
   }
 
@@ -164,9 +185,13 @@ export class AcpAgent implements acp.Agent {
       params: sessionParams,
     })
 
+    // A stored title is the only human-readable label a reloaded session has.
+    await this.adoptStoredTitle(params.sessionId)
+
     // Replay conversation history to the client via session updates.
     await this.replayHistory(params.sessionId, agent)
 
+    await this.persistSession(params.sessionId, this.sessions.get(params.sessionId)!)
     return {}
   }
 
@@ -363,18 +388,66 @@ export class AcpAgent implements acp.Agent {
     return {}
   }
 
-  async listSessions(params: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
-    const sessions: acp.SessionInfo[] = []
-    for (const [sessionId, session] of this.sessions) {
-      if (params.cwd && normalizePath(session.cwd) !== normalizePath(params.cwd)) continue
-      sessions.push({
-        sessionId,
-        cwd: session.cwd,
-        title: session.title,
-        updatedAt: session.lastUpdated.toISOString(),
-      })
+  /** Builds the ACP record for a session, which is exactly what a store holds. */
+  private sessionInfo(sessionId: string, session: Session): acp.SessionInfo {
+    return {
+      sessionId,
+      cwd: session.cwd,
+      title: session.title,
+      updatedAt: session.lastUpdated.toISOString(),
     }
-    return { sessions }
+  }
+
+  /**
+   * Writes a session's metadata to the store, if one is configured.
+   *
+   * Best-effort by design: a metadata write must never fail a user's turn, so a
+   * failure is reported and swallowed. stdout carries the JSON-RPC stream, so
+   * the diagnostic goes to stderr, which is where ACP clients look for agent
+   * logs.
+   */
+  private async persistSession(sessionId: string, session: Session): Promise<void> {
+    if (!this.sessionStore) return
+    try {
+      await this.sessionStore.save(this.sessionInfo(sessionId, session))
+    } catch (err) {
+      process.stderr.write(`strands-acp: could not persist session ${sessionId}: ${String(err)}\n`)
+    }
+  }
+
+  /**
+   * Restores a session's title from the store.
+   *
+   * `loadSession` builds a fresh in-memory session, which would otherwise reset
+   * the title to null and leave a reloaded session unlabelled in the client's
+   * picker. Looked up through `list` rather than a dedicated getter to keep the
+   * store interface at three methods; the scan is over session metadata, not
+   * conversation history.
+   */
+  private async adoptStoredTitle(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId)
+    if (!session || !this.sessionStore) return
+    try {
+      const stored = await this.sessionStore.list({})
+      const match = stored.find((info) => info.sessionId === sessionId)
+      if (match?.title) session.title = match.title
+    } catch (err) {
+      process.stderr.write(`strands-acp: could not read stored session ${sessionId}: ${String(err)}\n`)
+    }
+  }
+
+  async listSessions(params: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
+    const live = [...this.sessions].map(([sessionId, session]) => this.sessionInfo(sessionId, session))
+
+    if (!this.sessionStore) {
+      return { sessions: mergeSessionInfos(live, [], params.cwd) }
+    }
+
+    // A store failure propagates rather than degrading to the live-only list: an
+    // empty result reads to the client as "no sessions exist", which would be a
+    // wrong answer rather than a partial one.
+    const stored = await this.sessionStore.list({ cwd: params.cwd })
+    return { sessions: mergeSessionInfos(live, stored, params.cwd) }
   }
 
   async resumeSession(params: acp.ResumeSessionRequest): Promise<acp.ResumeSessionResponse> {
@@ -386,12 +459,17 @@ export class AcpAgent implements acp.Agent {
       session.params = { ...session.params, cwd: params.cwd }
     }
     session.agent = this.agentFactory(params.sessionId, session.params)
+    await this.persistSession(params.sessionId, session)
     return {}
   }
 
   async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
     const session = this.sessions.get(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
+
+    // The first prompt is the only human-readable thing the bridge ever learns
+    // about a session, so it is what a client's session picker has to show.
+    if (session.title === null) session.title = deriveTitle(params.prompt)
 
     session.abortController?.abort()
     session.abortController = new AbortController()
@@ -580,6 +658,7 @@ export class AcpAgent implements acp.Agent {
 
     session.abortController = null
     session.lastUpdated = new Date()
+    await this.persistSession(params.sessionId, session)
     if (cancelledByPermission) return { stopReason: 'cancelled' }
     return { stopReason: signal.aborted ? 'cancelled' : mapStopReason(agentResult?.stopReason ?? 'endTurn') }
   }
