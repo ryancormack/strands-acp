@@ -1,6 +1,15 @@
 import * as acp from '@agentclientprotocol/sdk'
 
 /**
+ * Character set Strands accepts for a session id.
+ *
+ * `SessionManager` runs every session id through this pattern and throws on a
+ * miss. Because an ACP session id is also the Strands session id (see
+ * {@link SessionStore}), an id the bridge hands out has to satisfy it.
+ */
+export const STRANDS_SESSION_ID_PATTERN = /^[a-z0-9_-]+$/
+
+/**
  * Durable storage for ACP-level session metadata.
  *
  * The bridge keeps live sessions in memory, so `session/list` can only ever see
@@ -16,6 +25,12 @@ import * as acp from '@agentclientprotocol/sdk'
  * `cwd` and `title` cannot be recovered from a Strands snapshot because they are
  * ACP concepts the agent never sees, which is why a read-only view over
  * snapshots is not sufficient and this interface has a write side.
+ *
+ * There is one id, not two. `SessionInfo.sessionId` is the value the bridge
+ * passes to `agentFactory`, which is the value that reaches `SessionManager`, so
+ * a session this store lists can be resumed by handing that same string back.
+ * Nothing here maps between an ACP id space and a Strands one, and a store that
+ * introduces such a mapping breaks resume.
  */
 export interface SessionStore {
   /**

@@ -16,13 +16,29 @@ import {
   type PermissionPolicy,
   type PermissionDecision,
 } from './permissions.js'
-import { mergeSessionInfos, deriveTitle, type SessionStore } from './session-store.js'
+import {
+  mergeSessionInfos,
+  deriveTitle,
+  STRANDS_SESSION_ID_PATTERN,
+  type SessionStore,
+} from './session-store.js'
 
 /**
  * Configuration for the ACP bridge.
  */
 export interface AcpBridgeConfig {
-  /** Factory that creates a Strands Agent for each session. */
+  /**
+   * Factory that creates a Strands Agent for each session.
+   *
+   * `sessionId` is not an opaque handle to pass over: it is the Strands session
+   * id. Forward it to a `SessionManager` (`new SessionManager({ sessionId })`)
+   * and history persists and replays on `session/load`. Drop it and each
+   * session starts empty, because nothing else tells Strands which snapshot
+   * belongs to this conversation.
+   *
+   * The id always matches {@link STRANDS_SESSION_ID_PATTERN}, so it can be used
+   * as a storage key without sanitising.
+   */
   agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
   /** Optional capabilities to advertise during initialization. Merged with defaults. */
   capabilities?: Partial<acp.AgentCapabilities>
@@ -72,10 +88,26 @@ interface Session {
   params: acp.NewSessionRequest
 }
 
+/**
+ * Generates a session id that is also usable as a Strands session id.
+ *
+ * Lowercase hex satisfies {@link STRANDS_SESSION_ID_PATTERN}. The check keeps
+ * the encoding and that requirement tied together, so changing the encoding to
+ * something Strands rejects (an uppercase UUID, a prefix with a colon) fails
+ * here instead of deep inside a caller's `SessionManager`.
+ */
 function generateSessionId(): string {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)))
+  const id = Array.from(crypto.getRandomValues(new Uint8Array(16)))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
+
+  if (!STRANDS_SESSION_ID_PATTERN.test(id)) {
+    throw new Error(
+      `generated session id '${id}' is not usable as a Strands session id (must match ${STRANDS_SESSION_ID_PATTERN})`,
+    )
+  }
+
+  return id
 }
 
 /** Extract ImageFormat from a MIME type string (e.g., 'image/png' -> 'png'). Throws for unsupported formats. */
