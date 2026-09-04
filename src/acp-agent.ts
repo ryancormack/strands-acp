@@ -338,6 +338,20 @@ export class AcpAgent implements acp.Agent {
     locations: acp.ToolCallLocation[],
     alreadyAnnounced: boolean,
   ): Promise<{ outcome: 'allowed' | 'denied' | 'cancelled'; announced: boolean }> {
+    // Hooks are awaited before the event reaches this consumer, so anything the
+    // agent's own intervention handlers decided is already on the event. A call
+    // they cancelled cannot run whatever the user answers, and asking anyway
+    // interrupts them for nothing and then discards the answer, which reads as
+    // the editor ignoring them. Their reason is left in place: it is the one the
+    // model receives, and it is more specific than anything this bridge knows.
+    if (event.cancel) {
+      await this.connection.sessionUpdate({
+        sessionId,
+        update: this.toolCallNotification(event, kind, locations, 'failed', alreadyAnnounced),
+      })
+      return { outcome: 'denied', announced: true }
+    }
+
     const decision = resolveDecision(event.toolUse.name, this.permissions, session.permissionOverrides)
 
     // Ungated calls are announced by the caller, exactly as before.

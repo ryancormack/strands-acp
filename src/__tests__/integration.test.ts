@@ -9,7 +9,14 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk'
-import { Agent, Model, tool } from '@strands-agents/sdk'
+import {
+  Agent,
+  Model,
+  tool,
+  InterventionHandler,
+  InterventionActions,
+  type BeforeToolCallEvent,
+} from '@strands-agents/sdk'
 import { z } from 'zod'
 import { AcpAgent, type AcpBridgeConfig } from '../acp-agent.js'
 
@@ -99,7 +106,11 @@ class ScriptedClient implements Client {
  * Builds a real Agent with one recording tool, wired through the real bridge and
  * a real ACP connection pair.
  */
-function buildHarness(answers: string[], permissions?: AcpBridgeConfig['permissions']) {
+function buildHarness(
+  answers: string[],
+  permissions?: AcpBridgeConfig['permissions'],
+  interventions?: InterventionHandler[],
+) {
   const sideEffects: string[] = []
 
   const writeFile = tool({
@@ -133,6 +144,7 @@ function buildHarness(answers: string[], permissions?: AcpBridgeConfig['permissi
               { text: 'all done' },
             ]) as unknown as ConstructorParameters<typeof Agent>[0]['model'],
             tools: [writeFile],
+            ...(interventions ? { interventions } : {}),
           }),
         ...(permissions ? { permissions } : {}),
       } as AcpBridgeConfig),
@@ -208,5 +220,37 @@ describe('real Strands Agent over a real ACP connection', () => {
 
     expect(harness.client.requests).toHaveLength(0)
     expect(harness.sideEffects).toEqual([])
+  })
+
+  it('defers to an intervention handler that already denied, without asking the user', async () => {
+    class DenyWrites extends InterventionHandler {
+      readonly name = 'deny-writes'
+      override beforeToolCall(event: BeforeToolCallEvent) {
+        return event.toolUse.name === 'write_file'
+          ? InterventionActions.deny('local policy forbids writes')
+          : InterventionActions.proceed()
+      }
+    }
+
+    // The user would answer allow_once if asked. They must not be asked: the
+    // call is already dead, so the prompt would be an interruption whose answer
+    // is thrown away.
+    const harness = buildHarness(['allow_once'], { default: 'ask' }, [new DenyWrites()])
+    const response = await runPrompt(harness)
+
+    expect(harness.client.requests).toHaveLength(0)
+    expect(harness.sideEffects).toEqual([])
+
+    // The call still reaches a terminal state in the client rather than being
+    // left in_progress forever.
+    const failed = harness.client.updates.filter((u) => {
+      const update = u.update as { sessionUpdate?: string; status?: string }
+      return update.sessionUpdate?.startsWith('tool_call') && update.status === 'failed'
+    })
+    expect(failed).toHaveLength(1)
+
+    // A local veto is a tool error, so the loop continues exactly as it does for
+    // a user rejection.
+    expect(response.stopReason).toBe('end_turn')
   })
 })
