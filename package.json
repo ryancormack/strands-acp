@@ -41,7 +41,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^1.5.0"
+    "@agentclientprotocol/sdk": "^1.4.0"
   },
   "peerDependencies": {
     "@strands-agents/sdk": "^1.0.0"
