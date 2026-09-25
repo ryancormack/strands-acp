@@ -38,7 +38,7 @@
     "llm"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0"

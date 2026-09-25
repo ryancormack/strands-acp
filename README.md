@@ -7,7 +7,7 @@ Bridge any [Strands](https://github.com/strands-agents/sdk-typescript) agent to 
 
 ## Requirements
 
-- Node.js >= 18
+- Node.js >= 22
 - `@strands-agents/sdk` is a peer dependency and must be installed in your project
 
 ## Installation
