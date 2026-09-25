@@ -17,5 +17,6 @@ export {
 export {
   mergeSessionInfos,
   deriveTitle,
+  STRANDS_SESSION_ID_PATTERN,
   type SessionStore,
 } from './session-store.js'

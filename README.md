@@ -270,6 +270,29 @@ the round-trip can take as long as the user needs, and setting the event's
 `cancel` field before resuming makes the agent skip the call. No timeout of the
 bridge's own is imposed.
 
+#### Interaction with the SDK's intervention handlers
+
+The ACP gate is not a second, competing approval system. Strands invokes an
+agent's `interventions` as hook callbacks and awaits them *before* the event is
+yielded to a consumer, so by the time this bridge sees a tool call, every
+`InterventionHandler` on that agent has already had its say.
+
+The bridge defers to them. A call an intervention handler denied is reported to
+the client as `failed` and the user is never asked, because the answer could not
+change the outcome and prompting for a discarded answer looks like the editor
+ignoring them. The handler's own reason is what the model receives, since it is
+more specific than anything the bridge could supply.
+
+That ordering is the useful one in both directions: a local policy can veto a
+call the user would have approved, and a user's rejection cannot be overridden by
+a handler that runs later, because none do. Configuring `permissions` and
+installing `interventions` on the same agent is therefore safe, and the two
+compose rather than racing.
+
+This needs no particular SDK version. On a Strands release without the
+intervention API nothing sets `cancel` before the bridge looks, and the gate
+behaves exactly as it did.
+
 ### Reasoning
 
 Reasoning deltas are sent as `agent_thought_chunk` rather than mixed into the

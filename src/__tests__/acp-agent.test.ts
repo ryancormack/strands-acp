@@ -7,8 +7,10 @@ import {
   type Client,
   type SessionNotification,
   type NewSessionRequest,
+  type SessionInfo,
 } from '@agentclientprotocol/sdk'
 import { AcpAgent, type AcpBridgeConfig } from '../acp-agent.js'
+import { STRANDS_SESSION_ID_PATTERN, type SessionStore } from '../session-store.js'
 import { TextBlock, ImageBlock, type Agent } from '@strands-agents/sdk'
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,22 @@ function createMockAgent(
     },
     cancel: vi.fn(),
   } as unknown as Agent
+}
+
+/**
+ * Minimal in-memory {@link SessionStore}. Deliberately ignores the `cwd` filter
+ * hint, so the bridge's own re-filtering is what has to be correct.
+ */
+function createMemoryStore(): SessionStore {
+  const rows = new Map<string, SessionInfo>()
+  return {
+    async list() {
+      return [...rows.values()]
+    },
+    async save(info: SessionInfo) {
+      rows.set(info.sessionId, info)
+    },
+  }
 }
 
 /**
@@ -1471,6 +1489,94 @@ describe('AcpAgent', () => {
     // Without releasing the generator, this stays false: breaking out of the
     // consumer loop alone never runs the agent's own cleanup.
     expect(cleanedUp).toBe(true)
+  })
+
+  it('hands agentFactory the same session id it returns to the client', async () => {
+    const seen: string[] = []
+    const { clientConn } = createConnectionPair((sessionId: string) => {
+      seen.push(sessionId)
+      return createMockAgent()
+    })
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+
+    // The factory is where a SessionManager gets built, so if these two ever
+    // diverge the snapshot is keyed to an id the client can never load.
+    expect(seen).toEqual([sessionId])
+  })
+
+  it('generates session ids Strands will accept as storage keys', async () => {
+    const { clientConn } = createConnectionPair(() => createMockAgent())
+
+    await clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+
+    const ids: string[] = []
+    for (let i = 0; i < 5; i++) {
+      const { sessionId } = await clientConn.newSession({ cwd: '/p', mcpServers: [] })
+      ids.push(sessionId)
+    }
+
+    for (const id of ids) {
+      // SessionManager throws on anything outside this set, and it throws from
+      // inside the caller's factory where the cause is not obvious.
+      expect(id).toMatch(STRANDS_SESSION_ID_PATTERN)
+    }
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('round-trips a stored session id back through loadSession', async () => {
+    const store = createMemoryStore()
+
+    // First bridge creates the session, which is what populates the store.
+    const first = createConnectionPair({
+      agentFactory: () => createMockAgent(),
+      sessionStore: store,
+    })
+    await first.clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+    const created = await first.clientConn.newSession({ cwd: '/p', mcpServers: [] })
+
+    // A second bridge shares the store but has no live session, so its listing
+    // can only come from the store. That is the path a client hits after a
+    // restart, and the only one where the store's id actually matters.
+    const seen: string[] = []
+    const second = createConnectionPair({
+      agentFactory: (sessionId: string) => {
+        seen.push(sessionId)
+        const agent = createMockAgent()
+        // A real Agent always has this; the bare mock does not, and
+        // replayHistory walks it on load.
+        ;(agent as any).messages = []
+        return agent
+      },
+      sessionStore: store,
+    })
+    await second.clientConn.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    })
+
+    const listed = await second.clientConn.listSessions({ cwd: '/p' })
+    expect(listed.sessions.map((s) => s.sessionId)).toEqual([created.sessionId])
+
+    // What session/list reports has to be loadable as-is, and the id that
+    // reaches the factory has to be that same string. A store that mapped
+    // between an ACP id space and a Strands one fails here.
+    await second.clientConn.loadSession({
+      sessionId: listed.sessions[0]!.sessionId,
+      cwd: '/p',
+      mcpServers: [],
+    })
+    expect(seen).toEqual([created.sessionId])
   })
 
 })
