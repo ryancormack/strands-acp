@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/ryancormack/strands-acp/compare/v0.1.1...v0.2.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* AcpAgent is no longer exported and no longer takes a connection. Use createAgentApp(config) for custom transports. createStdioServer returns an AgentConnection instead of an AgentSideConnection.
+
+### Bug Fixes
+
+* **deps:** bump @agentclientprotocol/sdk to ^1.7.0 ([#23](https://github.com/ryancormack/strands-acp/issues/23)) ([b23137b](https://github.com/ryancormack/strands-acp/commit/b23137b68b2dcb84ea931cc1ec58281c0530ba62))
+
+
+### Code Refactoring
+
+* serve the bridge through the agent() builder ([#25](https://github.com/ryancormack/strands-acp/issues/25)) ([715f779](https://github.com/ryancormack/strands-acp/commit/715f779890600d31b7254cfbce605b2809065f2c))
+
 ## [0.1.1](https://github.com/ryancormack/strands-acp/compare/v0.1.0...v0.1.1) (2026-10-02)
 
 
