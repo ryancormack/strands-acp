@@ -1,14 +1,14 @@
 import * as acp from '@agentclientprotocol/sdk'
 
-import { TextBlock, ImageBlock, type Agent } from '@strands-agents/sdk'
-import type { ImageFormat } from '@strands-agents/sdk'
+import type { Agent } from '@strands-agents/sdk'
 import {
   inferToolKind,
   extractLocations,
   mapStopReason,
   mapToolResultContent,
-  SUPPORTED_IMAGE_FORMATS,
 } from './mapping.js'
+import { toStrandsInput } from './prompt-input.js'
+import { runTurn, type TurnSink } from './turn-engine.js'
 import {
   resolveDecision,
   interpretPermissionResponse,
@@ -108,17 +108,6 @@ function generateSessionId(): string {
   }
 
   return id
-}
-
-/** Extract ImageFormat from a MIME type string (e.g., 'image/png' -> 'png'). Throws for unsupported formats. */
-function extractImageFormat(mimeType: string): ImageFormat {
-  const format = mimeType.replace(/^image\//, '')
-  if (!(SUPPORTED_IMAGE_FORMATS as readonly string[]).includes(format)) {
-    throw new Error(
-      `Unsupported image format: '${mimeType}'. Supported formats: ${SUPPORTED_IMAGE_FORMATS.join(', ')}`,
-    )
-  }
-  return format as ImageFormat
 }
 
 export class AcpAgent implements acp.Agent {
@@ -521,192 +510,97 @@ export class AcpAgent implements acp.Agent {
     session.abortController = new AbortController()
     const { signal } = session.abortController
 
-    // Map ACP content blocks to Strands InvokeArgs
-    const hasNonTextBlocks = params.prompt.some((c) => c.type !== 'text')
-    let invokeArgs: string | InstanceType<typeof TextBlock | typeof ImageBlock>[]
-
-    if (hasNonTextBlocks) {
-      // Map to Strands ContentBlock array
-      const contentBlocks: InstanceType<typeof TextBlock | typeof ImageBlock>[] = []
-      for (const block of params.prompt) {
-        if (block.type === 'text') {
-          contentBlocks.push(new TextBlock((block as acp.TextContent & { type: 'text' }).text))
-        } else if (block.type === 'image') {
-          const imageContent = block as acp.ImageContent & { type: 'image' }
-          const format = extractImageFormat(imageContent.mimeType)
-          const bytes = Buffer.from(imageContent.data, 'base64')
-          contentBlocks.push(new ImageBlock({ format, source: { bytes } }))
-        }
-        // Unknown block types are skipped
-      }
-      if (contentBlocks.length === 0) {
-        throw new Error(
-          `Prompt contained only unsupported content block types: ${params.prompt.map((b) => b.type).join(', ')}`,
-        )
-      }
-      invokeArgs = contentBlocks
-    } else {
-      // Text-only: extract as plain string (existing behavior)
-      invokeArgs = params.prompt
-        .filter((c) => c.type === 'text')
-        .map((c) => (c as acp.TextContent & { type: 'text' }).text)
-        .join('\n')
-    }
-
-    let currentToolCallId: string | undefined
-    let agentResult: { stopReason: string } | undefined
-    let cancelledByPermission = false
-
-    const gen = session.agent.stream(invokeArgs)
-
-    try {
-      let iterResult = await gen.next()
-      while (!iterResult.done) {
-        const event = iterResult.value
-        if (signal.aborted) break
-
-        switch (event.type) {
-          case 'modelStreamUpdateEvent': {
-            const inner = event.event
-            if (inner.type === 'modelContentBlockDeltaEvent' && inner.delta.type === 'textDelta') {
-              await this.connection.sessionUpdate({
-                sessionId: params.sessionId,
-                update: {
-                  sessionUpdate: 'agent_message_chunk',
-                  content: { type: 'text', text: inner.delta.text },
-                },
-              })
-            } else if (
-              inner.type === 'modelContentBlockDeltaEvent' &&
-              inner.delta.type === 'reasoningContentDelta'
-            ) {
-              // Reasoning is a distinct update in ACP so clients can collapse it
-              // separately from the answer.
-              const reasoning = inner.delta as unknown as { text?: string }
-              if (reasoning.text) {
-                await this.connection.sessionUpdate({
-                  sessionId: params.sessionId,
-                  update: {
-                    sessionUpdate: 'agent_thought_chunk',
-                    content: { type: 'text', text: reasoning.text },
-                  },
-                })
-              }
-            } else if (inner.type === 'modelContentBlockStartEvent' && inner.start?.type === 'toolUseStart') {
-              currentToolCallId = inner.start.toolUseId
-              await this.connection.sessionUpdate({
-                sessionId: params.sessionId,
-                update: {
-                  sessionUpdate: 'tool_call',
-                  toolCallId: inner.start.toolUseId,
-                  title: inner.start.name,
-                  kind: inferToolKind(inner.start.name, this.toolKinds),
-                  status: 'in_progress',
-                  rawInput: {},
-                },
-              })
-            }
-            break
-          }
-          case 'beforeToolCallEvent': {
-            const kind = inferToolKind(event.toolUse.name, this.toolKinds)
-            const locations = extractLocations(event.toolUse.input, kind)
-
-            // The agent is suspended at this yield, so the permission round-trip
-            // can take as long as the user needs. Setting `event.cancel` before
-            // resuming the generator makes the agent skip the call and hand the
-            // model an error result instead.
-            const gateOutcome = await this.gateToolCall(
-              params.sessionId,
-              session,
-              event,
-              kind,
-              locations,
-              currentToolCallId === event.toolUse.toolUseId,
-            )
-            if (gateOutcome.outcome === 'cancelled') {
-              cancelledByPermission = true
-            }
-            if (gateOutcome.outcome !== 'allowed') {
-              currentToolCallId = undefined
-              break
-            }
-
-            // The gate may have owned the first announcement. Either way the
-            // client already knows this id, so send an update, not a second
-            // tool_call.
-            if (gateOutcome.announced) currentToolCallId = event.toolUse.toolUseId
-
-            if (currentToolCallId === event.toolUse.toolUseId) {
-              // The stream already announced this call with an empty input; fill
-              // in the parsed arguments and the locations they resolve to.
-              await this.connection.sessionUpdate({
-                sessionId: params.sessionId,
-                update: {
-                  sessionUpdate: 'tool_call_update',
-                  toolCallId: event.toolUse.toolUseId,
-                  rawInput: event.toolUse.input,
-                  ...(locations.length > 0 ? { locations } : {}),
-                },
-              })
-              break
-            }
-            currentToolCallId = event.toolUse.toolUseId
-            await this.connection.sessionUpdate({
-              sessionId: params.sessionId,
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: event.toolUse.toolUseId,
-                title: event.toolUse.name,
-                kind,
-                status: 'in_progress',
-                rawInput: event.toolUse.input,
-                ...(locations.length > 0 ? { locations } : {}),
-              },
-            })
-            break
-          }
-          case 'afterToolCallEvent': {
-            if (currentToolCallId) {
-              // `error` is populated when the tool threw. Reporting every call as
-              // completed hides real failures from the client.
-              const failed = event.error !== undefined
-              const content = mapToolResultContent(event.result)
-              await this.connection.sessionUpdate({
-                sessionId: params.sessionId,
-                update: {
-                  sessionUpdate: 'tool_call_update',
-                  toolCallId: currentToolCallId,
-                  status: failed ? 'failed' : 'completed',
-                  ...(content.length > 0 ? { content } : {}),
-                },
-              })
-              currentToolCallId = undefined
-            }
-            break
-          }
-        }
-
-        iterResult = await gen.next()
-      }
-
-      if (iterResult.done) {
-        agentResult = iterResult.value as { stopReason: string }
-      }
-      // Releasing the generator runs its `finally` blocks. Breaking out of the
-      // loop on cancellation without this leaves the agent's own cleanup pending.
-      if (!iterResult.done) await gen.return(undefined as never)
-    } catch (err) {
-      await gen.return(undefined as never).catch(() => {})
-      if (signal.aborted) return { stopReason: 'cancelled' }
-      throw err
-    }
+    const input = toStrandsInput(params.prompt)
+    const result = await runTurn(session.agent, input, signal, this.v1TurnSink(params.sessionId, session))
+    if (result.outcome === 'aborted') return { stopReason: 'cancelled' }
 
     session.abortController = null
     session.lastUpdated = new Date()
     await this.persistSession(params.sessionId, session)
-    if (cancelledByPermission) return { stopReason: 'cancelled' }
-    return { stopReason: signal.aborted ? 'cancelled' : mapStopReason(agentResult?.stopReason ?? 'endTurn') }
+    if (result.cancelledByGate) return { stopReason: 'cancelled' }
+    return { stopReason: signal.aborted ? 'cancelled' : mapStopReason(result.stopReason ?? 'endTurn') }
+  }
+
+  /**
+   * Renders a turn as v1 session updates. v1 wants exactly one `tool_call` per
+   * invocation followed by `tool_call_update`s, so this tracks which call the
+   * client already knows about.
+   */
+  private v1TurnSink(sessionId: string, session: Session): TurnSink {
+    let currentToolCallId: string | undefined
+    const send = (update: acp.SessionUpdate) => this.connection.sessionUpdate({ sessionId, update })
+
+    return {
+      textDelta: (text) => send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }),
+      thoughtDelta: (text) => send({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } }),
+      toolStarted: async ({ toolUseId, name }) => {
+        currentToolCallId = toolUseId
+        await send({
+          sessionUpdate: 'tool_call',
+          toolCallId: toolUseId,
+          title: name,
+          kind: inferToolKind(name, this.toolKinds),
+          status: 'in_progress',
+          rawInput: {},
+        })
+      },
+      beforeToolCall: async (toolUse, priorCancel) => {
+        const kind = inferToolKind(toolUse.name, this.toolKinds)
+        const locations = extractLocations(toolUse.input, kind)
+        const event = { toolUse, cancel: priorCancel }
+        const gate = await this.gateToolCall(
+          sessionId,
+          session,
+          event,
+          kind,
+          locations,
+          currentToolCallId === toolUse.toolUseId,
+        )
+        if (gate.outcome !== 'allowed') {
+          currentToolCallId = undefined
+          return {
+            allowed: false,
+            ...(event.cancel !== priorCancel ? { reason: event.cancel as string } : {}),
+            cancelTurn: gate.outcome === 'cancelled',
+          }
+        }
+
+        if (gate.announced) currentToolCallId = toolUse.toolUseId
+        const locationField = locations.length > 0 ? { locations } : {}
+
+        if (currentToolCallId === toolUse.toolUseId) {
+          await send({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: toolUse.toolUseId,
+            rawInput: toolUse.input as Record<string, unknown>,
+            ...locationField,
+          })
+        } else {
+          currentToolCallId = toolUse.toolUseId
+          await send({
+            sessionUpdate: 'tool_call',
+            toolCallId: toolUse.toolUseId,
+            title: toolUse.name,
+            kind,
+            status: 'in_progress',
+            rawInput: toolUse.input as Record<string, unknown>,
+            ...locationField,
+          })
+        }
+        return { allowed: true }
+      },
+      toolFinished: async ({ failed, result }) => {
+        if (!currentToolCallId) return
+        const content = mapToolResultContent(result as Parameters<typeof mapToolResultContent>[0])
+        await send({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: currentToolCallId,
+          status: failed ? 'failed' : 'completed',
+          ...(content.length > 0 ? { content } : {}),
+        })
+        currentToolCallId = undefined
+      },
+    }
   }
 
   async cancel(params: acp.CancelNotification): Promise<void> {
