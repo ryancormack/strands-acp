@@ -52,10 +52,16 @@ or publish by hand:
 
 ### Beta / prerelease versions
 
-If a GitHub Release is marked as a **prerelease** (version has a `-beta.N`
-suffix), `publish.yml` publishes it to the npm `beta` dist-tag instead of
-`latest`, so `npm install @ryancormack/strands-acp` keeps getting the stable
-line while `npm install @ryancormack/strands-acp@beta` gets the prerelease.
+If the version has a `-beta.N` suffix, `publish.yml` publishes it to the npm
+`beta` dist-tag instead of `latest`, so `npm install @ryancormack/strands-acp`
+keeps getting the stable line while `npm install @ryancormack/strands-acp@beta`
+gets the prerelease.
+
+### Re-publishing a release
+
+If a publish run fails, fix the cause on `main` and run the **Publish to NPM**
+workflow manually (Actions tab, or `gh workflow run publish.yml -f tag=v0.1.0`)
+with the existing release tag.
 
 ### Future: a v2 line on its own branch
 
