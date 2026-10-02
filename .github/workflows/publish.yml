@@ -41,4 +41,4 @@ jobs:
           npm version "$VERSION" --no-git-tag-version
 
       - name: Publish to NPM
-        run: pnpm publish --no-git-checks --provenance
+        run: pnpm publish --no-git-checks --provenance --tag ${{ github.event.release.prerelease && 'beta' || 'latest' }}
