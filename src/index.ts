@@ -1,4 +1,5 @@
-export { AcpAgent, type AcpBridgeConfig } from './acp-agent.js'
+export { createAgentApp, type AcpBridgeConfig } from './acp-agent.js'
+export { SessionRegistry } from './session-registry.js'
 export { createStdioServer } from './stdio.js'
 export {
   inferToolKind,

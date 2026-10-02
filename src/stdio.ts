@@ -1,7 +1,7 @@
 import * as acp from '@agentclientprotocol/sdk'
 import { Readable, Writable } from 'node:stream'
 import type { Agent } from '@strands-agents/sdk'
-import { AcpAgent, type AcpBridgeConfig } from './acp-agent.js'
+import { createAgentApp, type AcpBridgeConfig } from './acp-agent.js'
 
 /**
  * Creates an ACP stdio server that bridges any Strands Agent to the
@@ -28,9 +28,9 @@ import { AcpAgent, type AcpBridgeConfig } from './acp-agent.js'
  */
 export function createStdioServer(
   config: ((sessionId: string) => Agent) | AcpBridgeConfig,
-): acp.AgentSideConnection {
+): acp.AgentConnection {
   const input = Writable.toWeb(process.stdout)
   const output = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>
   const stream = acp.ndJsonStream(input, output)
-  return new acp.AgentSideConnection((conn) => new AcpAgent(conn, config), stream)
+  return createAgentApp(config).connect(stream)
 }

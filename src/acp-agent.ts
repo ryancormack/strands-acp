@@ -14,8 +14,8 @@ import {
   interpretPermissionResponse,
   PERMISSION_OPTIONS,
   type PermissionPolicy,
-  type PermissionDecision,
 } from './permissions.js'
+import { SessionRegistry, type Session } from './session-registry.js'
 import {
   mergeSessionInfos,
   deriveTitle,
@@ -68,24 +68,11 @@ export interface AcpBridgeConfig {
    * This carries only the ACP-level record the protocol asks for.
    */
   sessionStore?: SessionStore
-}
-
-interface Session {
-  agent: Agent
   /**
-   * Decisions remembered from `allow_always` / `reject_always` answers.
-   *
-   * In-memory and intentionally not persisted: a resumed session starts empty
-   * and asks again, because the workspace may have changed since the answer was
-   * given. The configured {@link PermissionPolicy} is the durable layer.
+   * Where live sessions are held. Every connection served by the same app
+   * already shares one; pass your own to share sessions across several apps.
    */
-  permissionOverrides: Map<string, PermissionDecision>
-  abortController: AbortController | null
-  cwd: string
-  createdAt: Date
-  lastUpdated: Date
-  title: string | null
-  params: acp.NewSessionRequest
+  sessions?: SessionRegistry
 }
 
 /**
@@ -110,20 +97,21 @@ function generateSessionId(): string {
   return id
 }
 
-export class AcpAgent implements acp.Agent {
-  private connection: acp.AgentSideConnection
-  private sessions = new Map<string, Session>()
+type Client = acp.AgentContext
+
+/**
+ * Translates ACP v1 requests into Strands agent calls. Holds no connection:
+ * each handler is given the client of the connection the request arrived on.
+ */
+export class AcpAgent {
+  private sessions: SessionRegistry
   private agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
   private capabilitiesConfig: Partial<acp.AgentCapabilities> | undefined
   private toolKinds: Record<string, acp.ToolKind> | undefined
   private permissions: PermissionPolicy | undefined
   private sessionStore: SessionStore | undefined
 
-  constructor(
-    connection: acp.AgentSideConnection,
-    config: ((sessionId: string) => Agent) | AcpBridgeConfig,
-  ) {
-    this.connection = connection
+  constructor(config: ((sessionId: string) => Agent) | AcpBridgeConfig) {
     if (typeof config === 'function') {
       // Backwards-compatible: simple factory function (ignores second param)
       this.agentFactory = (sessionId: string, _sessionParams: acp.NewSessionRequest) => config(sessionId)
@@ -131,12 +119,14 @@ export class AcpAgent implements acp.Agent {
       this.toolKinds = undefined
       this.permissions = undefined
       this.sessionStore = undefined
+      this.sessions = new SessionRegistry()
     } else {
       this.agentFactory = config.agentFactory
       this.capabilitiesConfig = config.capabilities
       this.toolKinds = config.toolKinds
       this.permissions = config.permissions
       this.sessionStore = config.sessionStore
+      this.sessions = config.sessions ?? new SessionRegistry()
     }
   }
 
@@ -192,7 +182,7 @@ export class AcpAgent implements acp.Agent {
     return { sessionId }
   }
 
-  async loadSession(params: acp.LoadSessionRequest): Promise<acp.LoadSessionResponse> {
+  async loadSession(params: acp.LoadSessionRequest, client: Client): Promise<acp.LoadSessionResponse> {
     const sessionParams = { cwd: params.cwd, mcpServers: params.mcpServers } as acp.NewSessionRequest
     const agent = this.agentFactory(params.sessionId, sessionParams)
     this.sessions.set(params.sessionId, {
@@ -210,7 +200,7 @@ export class AcpAgent implements acp.Agent {
     await this.adoptStoredTitle(params.sessionId)
 
     // Replay conversation history to the client via session updates.
-    await this.replayHistory(params.sessionId, agent)
+    await this.replayHistory(params.sessionId, agent, client)
 
     await this.persistSession(params.sessionId, this.sessions.get(params.sessionId)!)
     return {}
@@ -223,45 +213,38 @@ export class AcpAgent implements acp.Agent {
    * leave the client's transcript missing the images the user sent and every
    * tool the agent ran, which is the visible half of an agentic session.
    */
-  private async replayHistory(sessionId: string, agent: Agent): Promise<void> {
+  private async replayHistory(sessionId: string, agent: Agent, client: Client): Promise<void> {
+    const send = (update: acp.SessionUpdate) => client.notify('session/update', { sessionId, update })
+
     for (const message of agent.messages) {
       const updateType = message.role === 'user' ? 'user_message_chunk' : 'agent_message_chunk'
 
       for (const block of message.content) {
         if (block.type === 'textBlock') {
-          await this.connection.sessionUpdate({
-            sessionId,
-            update: { sessionUpdate: updateType, content: { type: 'text', text: block.text } },
-          })
+          await send({ sessionUpdate: updateType, content: { type: 'text', text: block.text } })
         } else if (block.type === 'imageBlock') {
           const image = block as unknown as { format?: string; source?: { bytes?: Uint8Array } }
           const bytes = image.source?.bytes
           if (!bytes) continue
-          await this.connection.sessionUpdate({
-            sessionId,
-            update: {
-              sessionUpdate: updateType,
-              content: {
-                type: 'image',
-                mimeType: `image/${image.format ?? 'png'}`,
-                data: Buffer.from(bytes).toString('base64'),
-              },
+          await send({
+            sessionUpdate: updateType,
+            content: {
+              type: 'image',
+              mimeType: `image/${image.format ?? 'png'}`,
+              data: Buffer.from(bytes).toString('base64'),
             },
           })
         } else if (block.type === 'toolUseBlock') {
           const toolUse = block as unknown as { toolUseId: string; name: string; input?: unknown }
           const kind = inferToolKind(toolUse.name, this.toolKinds)
-          await this.connection.sessionUpdate({
-            sessionId,
-            update: {
-              sessionUpdate: 'tool_call',
-              toolCallId: toolUse.toolUseId,
-              title: toolUse.name,
-              kind,
-              status: 'completed',
-              rawInput: (toolUse.input ?? {}) as Record<string, unknown>,
-              locations: extractLocations(toolUse.input, kind),
-            },
+          await send({
+            sessionUpdate: 'tool_call',
+            toolCallId: toolUse.toolUseId,
+            title: toolUse.name,
+            kind,
+            status: 'completed',
+            rawInput: (toolUse.input ?? {}) as Record<string, unknown>,
+            locations: extractLocations(toolUse.input, kind),
           })
         }
       }
@@ -320,6 +303,7 @@ export class AcpAgent implements acp.Agent {
   }
 
   private async gateToolCall(
+    client: Client,
     sessionId: string,
     session: Session,
     event: { toolUse: { toolUseId: string; name: string; input: unknown }; cancel?: boolean | string },
@@ -327,6 +311,8 @@ export class AcpAgent implements acp.Agent {
     locations: acp.ToolCallLocation[],
     alreadyAnnounced: boolean,
   ): Promise<{ outcome: 'allowed' | 'denied' | 'cancelled'; announced: boolean }> {
+    const send = (update: acp.SessionUpdate) => client.notify('session/update', { sessionId, update })
+
     // Hooks are awaited before the event reaches this consumer, so anything the
     // agent's own intervention handlers decided is already on the event. A call
     // they cancelled cannot run whatever the user answers, and asking anyway
@@ -334,10 +320,7 @@ export class AcpAgent implements acp.Agent {
     // the editor ignoring them. Their reason is left in place: it is the one the
     // model receives, and it is more specific than anything this bridge knows.
     if (event.cancel) {
-      await this.connection.sessionUpdate({
-        sessionId,
-        update: this.toolCallNotification(event, kind, locations, 'failed', alreadyAnnounced),
-      })
+      await send(this.toolCallNotification(event, kind, locations, 'failed', alreadyAnnounced))
       return { outcome: 'denied', announced: true }
     }
 
@@ -348,21 +331,15 @@ export class AcpAgent implements acp.Agent {
 
     if (decision === 'deny') {
       event.cancel = `Tool '${event.toolUse.name}' is not permitted by policy.`
-      await this.connection.sessionUpdate({
-        sessionId,
-        update: this.toolCallNotification(event, kind, locations, 'failed', alreadyAnnounced),
-      })
+      await send(this.toolCallNotification(event, kind, locations, 'failed', alreadyAnnounced))
       return { outcome: 'denied', announced: true }
     }
 
     // 'ask' — announce the pending call so the client can show what it is
     // approving, then wait for the answer.
-    await this.connection.sessionUpdate({
-      sessionId,
-      update: this.toolCallNotification(event, kind, locations, 'pending', alreadyAnnounced),
-    })
+    await send(this.toolCallNotification(event, kind, locations, 'pending', alreadyAnnounced))
 
-    const response = await this.connection.requestPermission({
+    const response = await client.request('session/request_permission', {
       sessionId,
       toolCall: {
         toolCallId: event.toolUse.toolUseId,
@@ -379,14 +356,7 @@ export class AcpAgent implements acp.Agent {
     if (outcome.remember) session.permissionOverrides.set(event.toolUse.name, outcome.remember)
 
     if (outcome.allowed) {
-      await this.connection.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: 'tool_call_update',
-          toolCallId: event.toolUse.toolUseId,
-          status: 'in_progress',
-        },
-      })
+      await send({ sessionUpdate: 'tool_call_update', toolCallId: event.toolUse.toolUseId, status: 'in_progress' })
       return { outcome: 'allowed', announced: true }
     }
 
@@ -394,14 +364,7 @@ export class AcpAgent implements acp.Agent {
       ? 'The user cancelled this request.'
       : `The user rejected running '${event.toolUse.name}'.`
 
-    await this.connection.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: 'tool_call_update',
-        toolCallId: event.toolUse.toolUseId,
-        status: 'failed',
-      },
-    })
+    await send({ sessionUpdate: 'tool_call_update', toolCallId: event.toolUse.toolUseId, status: 'failed' })
 
     return { outcome: outcome.cancelled ? 'cancelled' : 'denied', announced: true }
   }
@@ -472,7 +435,7 @@ export class AcpAgent implements acp.Agent {
   }
 
   async listSessions(params: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
-    const live = [...this.sessions].map(([sessionId, session]) => this.sessionInfo(sessionId, session))
+    const live = [...this.sessions.entries()].map(([sessionId, session]) => this.sessionInfo(sessionId, session))
 
     if (!this.sessionStore) {
       return { sessions: mergeSessionInfos(live, [], params.cwd) }
@@ -498,7 +461,7 @@ export class AcpAgent implements acp.Agent {
     return {}
   }
 
-  async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
+  async prompt(params: acp.PromptRequest, client: Client): Promise<acp.PromptResponse> {
     const session = this.sessions.get(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
 
@@ -511,7 +474,7 @@ export class AcpAgent implements acp.Agent {
     const { signal } = session.abortController
 
     const input = toStrandsInput(params.prompt)
-    const result = await runTurn(session.agent, input, signal, this.v1TurnSink(params.sessionId, session))
+    const result = await runTurn(session.agent, input, signal, this.v1TurnSink(params.sessionId, session, client))
     if (result.outcome === 'aborted') return { stopReason: 'cancelled' }
 
     session.abortController = null
@@ -526,9 +489,9 @@ export class AcpAgent implements acp.Agent {
    * invocation followed by `tool_call_update`s, so this tracks which call the
    * client already knows about.
    */
-  private v1TurnSink(sessionId: string, session: Session): TurnSink {
+  private v1TurnSink(sessionId: string, session: Session, client: Client): TurnSink {
     let currentToolCallId: string | undefined
-    const send = (update: acp.SessionUpdate) => this.connection.sessionUpdate({ sessionId, update })
+    const send = (update: acp.SessionUpdate) => client.notify('session/update', { sessionId, update })
 
     return {
       textDelta: (text) => send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }),
@@ -549,6 +512,7 @@ export class AcpAgent implements acp.Agent {
         const locations = extractLocations(toolUse.input, kind)
         const event = { toolUse, cancel: priorCancel }
         const gate = await this.gateToolCall(
+          client,
           sessionId,
           session,
           event,
@@ -610,4 +574,26 @@ export class AcpAgent implements acp.Agent {
       session.abortController?.abort()
     }
   }
+}
+
+/**
+ * Builds an ACP v1 agent app for a Strands agent. Serve it with
+ * `app.connect(stream)`, or hand it to the SDK's `AcpServer` or protocol
+ * router; every connection it serves shares one set of sessions.
+ */
+export function createAgentApp(config: ((sessionId: string) => Agent) | AcpBridgeConfig): acp.AgentApp {
+  const bridge = new AcpAgent(config)
+
+  return acp
+    .agent({ name: 'strands-acp' })
+    .onRequest('initialize', ({ params }) => bridge.initialize(params))
+    .onRequest('authenticate', ({ params }) => bridge.authenticate(params))
+    .onRequest('session/new', ({ params }) => bridge.newSession(params))
+    .onRequest('session/load', ({ params, client }) => bridge.loadSession(params, client))
+    .onRequest('session/list', ({ params }) => bridge.listSessions(params))
+    .onRequest('session/resume', ({ params }) => bridge.resumeSession(params))
+    .onRequest('session/close', ({ params }) => bridge.closeSession(params))
+    .onRequest('session/set_mode', ({ params }) => bridge.setSessionMode(params))
+    .onRequest('session/prompt', ({ params, client }) => bridge.prompt(params, client))
+    .onNotification('session/cancel', ({ params }) => bridge.cancel(params))
 }
