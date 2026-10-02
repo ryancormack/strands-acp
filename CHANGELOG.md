@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/ryancormack/strands-acp/compare/v0.1.0...v0.1.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ci:** accept component-prefixed release tags and allow manual publish ([#18](https://github.com/ryancormack/strands-acp/issues/18)) ([0e5bb3a](https://github.com/ryancormack/strands-acp/commit/0e5bb3a435df4ca0345d42ea72553eb71230f1f1))
+* **ci:** allow npm version to match the already-bumped package.json ([#20](https://github.com/ryancormack/strands-acp/issues/20)) ([49f1aeb](https://github.com/ryancormack/strands-acp/commit/49f1aeb819c23b8c28e846a58848566cd9bf86ee))
+
 ## [0.1.0](https://github.com/ryancormack/strands-acp/compare/strands-acp-v0.0.7...strands-acp-v0.1.0) (2026-10-02)
 
 
