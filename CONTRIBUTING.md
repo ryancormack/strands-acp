@@ -22,6 +22,49 @@ pnpm test    # vitest run
 3. Run `pnpm build` and `pnpm test` locally before opening a PR.
 4. Open a PR against `main` and fill in the template.
 
+## Commit messages
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org).
+The commit messages that land on `main` drive automated releases, so the prefix
+matters:
+
+- `fix:` — a bug fix (bumps the patch version)
+- `feat:` — a new feature (bumps the minor version)
+- `feat!:` or a `BREAKING CHANGE:` footer — a breaking change (bumps the major version)
+- `docs:`, `chore:`, `refactor:`, `test:`, `ci:` — no release on their own
+
+PRs are squash-merged, so the PR title becomes the commit on `main` — write the
+PR title as a Conventional Commit.
+
+## Releases
+
+Releases are automated with
+[Release Please](https://github.com/googleapis/release-please). You do not tag
+or publish by hand:
+
+1. Merging Conventional Commits to `main` makes Release Please open (and keep
+   updating) a **Release PR** that bumps the version in `package.json`, updates
+   `CHANGELOG.md`, and previews the notes.
+2. When the release is ready, merge the Release PR. Release Please then cuts the
+   git tag and the GitHub Release.
+3. The published GitHub Release triggers `publish.yml`, which publishes to npm
+   with provenance.
+
+### Beta / prerelease versions
+
+If a GitHub Release is marked as a **prerelease** (version has a `-beta.N`
+suffix), `publish.yml` publishes it to the npm `beta` dist-tag instead of
+`latest`, so `npm install @ryancormack/strands-acp` keeps getting the stable
+line while `npm install @ryancormack/strands-acp@beta` gets the prerelease.
+
+### Future: a v2 line on its own branch
+
+When work on a new major version starts, it can be tracked on a dedicated branch
+(e.g. `v2`) with its own Release Please config set to `"prerelease": true`,
+cutting `2.0.0-beta.N` releases independently while `main` keeps shipping the
+1.x line. The current setup tracks only the stable line on `main`; the v2 branch
+flow is documented here for when that time comes but is not wired yet.
+
 ## What happens on your PR
 
 Every PR runs the same checks, and all of them must pass before it can merge:
