@@ -49,7 +49,7 @@ jobs:
         run: |
           VERSION=$(printf '%s' "$TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$')
           test -n "$VERSION"
-          npm version "$VERSION" --no-git-tag-version
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
           case "$VERSION" in *-*) echo "NPM_TAG=beta" >> "$GITHUB_ENV" ;; *) echo "NPM_TAG=latest" >> "$GITHUB_ENV" ;; esac
 
       - name: Publish to NPM
