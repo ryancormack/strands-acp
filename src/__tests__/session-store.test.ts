@@ -1,14 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   ClientSideConnection,
-  AgentSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
   type Client,
   type SessionNotification,
   type SessionInfo,
 } from '@agentclientprotocol/sdk'
-import { AcpAgent, type AcpBridgeConfig } from '../acp-agent.js'
+import { createAgentApp, type AcpBridgeConfig } from '../acp-agent.js'
 import type { Agent } from '@strands-agents/sdk'
 import { mergeSessionInfos, deriveTitle, type SessionStore } from '../session-store.js'
 
@@ -53,10 +52,7 @@ function connect(config: AcpBridgeConfig, client: Client) {
     () => client,
     ndJsonStream(clientToAgent.writable, agentToClient.readable),
   )
-  new AgentSideConnection(
-    (conn) => new AcpAgent(conn, config),
-    ndJsonStream(agentToClient.writable, clientToAgent.readable),
-  )
+  createAgentApp(config).connect(ndJsonStream(agentToClient.writable, clientToAgent.readable))
   return clientConn
 }
 

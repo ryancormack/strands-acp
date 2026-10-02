@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
   ClientSideConnection,
-  AgentSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
   type Client,
@@ -18,7 +17,7 @@ import {
   type BeforeToolCallEvent,
 } from '@strands-agents/sdk'
 import { z } from 'zod'
-import { AcpAgent, type AcpBridgeConfig } from '../acp-agent.js'
+import { createAgentApp, type AcpBridgeConfig } from '../acp-agent.js'
 
 /**
  * Integration tests that drive a **real** Strands `Agent` — real event loop, real
@@ -134,22 +133,18 @@ function buildHarness(
     ndJsonStream(clientToAgent.writable, agentToClient.readable),
   )
 
-  new AgentSideConnection(
-    (conn) =>
-      new AcpAgent(conn, {
-        agentFactory: () =>
-          new Agent({
-            model: new StubModel([
-              { toolUse: { name: 'write_file', toolUseId: 'call-1', input: { path: '/tmp/a.txt', content: 'hi' } } },
-              { text: 'all done' },
-            ]) as unknown as ConstructorParameters<typeof Agent>[0]['model'],
-            tools: [writeFile],
-            ...(interventions ? { interventions } : {}),
-          }),
-        ...(permissions ? { permissions } : {}),
-      } as AcpBridgeConfig),
-    ndJsonStream(agentToClient.writable, clientToAgent.readable),
-  )
+  createAgentApp({
+    agentFactory: () =>
+      new Agent({
+        model: new StubModel([
+          { toolUse: { name: 'write_file', toolUseId: 'call-1', input: { path: '/tmp/a.txt', content: 'hi' } } },
+          { text: 'all done' },
+        ]) as unknown as ConstructorParameters<typeof Agent>[0]['model'],
+        tools: [writeFile],
+        ...(interventions ? { interventions } : {}),
+      }),
+    ...(permissions ? { permissions } : {}),
+  } as AcpBridgeConfig).connect(ndJsonStream(agentToClient.writable, clientToAgent.readable))
 
   return { clientConn, client, sideEffects }
 }

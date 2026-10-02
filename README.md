@@ -310,7 +310,14 @@ the agent's own cleanup runs rather than being left pending.
 Creates an ACP stdio server bridging a Strands Agent to the Agent Client Protocol over stdin/stdout (newline-delimited JSON-RPC).
 
 - **config** `((sessionId: string) => Agent) | AcpBridgeConfig` - Either a simple factory function or a full configuration object.
-- **Returns** `AgentSideConnection`
+- **Returns** `AgentConnection`
+
+### `createAgentApp(config)`
+
+Builds the ACP v1 agent app that `createStdioServer` serves, for use with any other transport. Pass it to `app.connect(stream)`, or as the `agent` of the SDK's `AcpServer`. Every connection the app serves shares the same sessions, so a client that reconnects finds its sessions still there.
+
+- **config** - same as `createStdioServer`.
+- **Returns** `AgentApp`
 
 ### `AcpBridgeConfig`
 
@@ -320,6 +327,8 @@ interface AcpBridgeConfig {
   capabilities?: Partial<AgentCapabilities>
   toolKinds?: Record<string, ToolKind>
   permissions?: PermissionPolicy
+  sessionStore?: SessionStore
+  sessions?: SessionRegistry
 }
 
 interface PermissionPolicy {
@@ -333,10 +342,11 @@ interface PermissionPolicy {
 - **toolKinds** — explicit tool-name to ACP tool-kind mapping. Any tool not listed has its kind inferred from its name.
 - **permissions** — tool-call approval policy. Omitted means never ask.
 - **sessionStore** — durable store for ACP session metadata. Omitted means `session/list` reports only sessions this process created.
+- **sessions** — where live sessions are held. Omitted means each app keeps its own. Pass one `SessionRegistry` to several apps to share sessions between them.
 
 ### `AcpAgent`
 
-The core class that implements the `acp.Agent` interface, translating ACP requests into Strands agent interactions. It handles:
+The core class, translating ACP requests into Strands agent interactions. It handles:
 
 - Session lifecycle (create, list, resume, close)
 - Prompt streaming with text, image, and tool call events
@@ -346,7 +356,7 @@ The core class that implements the `acp.Agent` interface, translating ACP reques
 
 Some of these are narrower than the list suggests. See [Known gaps](#known-gaps).
 
-You typically do not instantiate `AcpAgent` directly. Use `createStdioServer` for the standard transport, or create a custom transport by passing an `AcpAgent` to an `AgentSideConnection`.
+It is internal. Use `createStdioServer` for the standard transport, or `createAgentApp` for any other.
 
 ## Known gaps
 
