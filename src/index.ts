@@ -1,4 +1,10 @@
-export { createAgentApp, type AcpBridgeConfig } from './acp-agent.js'
+export {
+  createAgentApp,
+  OWNER_META_KEY,
+  type AcpBridgeConfig,
+  type Principal,
+  type SessionContext,
+} from './acp-agent.js'
 export { SessionRegistry } from './session-registry.js'
 export { createStdioServer } from './stdio.js'
 export {

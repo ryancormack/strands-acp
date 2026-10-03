@@ -303,6 +303,52 @@ assistant message, so clients can collapse them separately from the answer.
 `session/cancel` aborts the in-flight prompt and releases the agent's stream, so
 the agent's own cleanup runs rather than being left pending.
 
+### HTTP transport
+
+`createHttpHandler` serves the bridge over ACP Streamable HTTP: one endpoint
+taking `POST` for client messages, `GET` for the SSE streams the agent answers
+on, and `DELETE` to end a connection. It is a handler, not a server. You mount
+it at the path clients connect to, and TLS, binding and routing stay yours.
+
+```ts
+import { createServer } from 'node:http'
+import { createHttpHandler } from '@ryancormack/strands-acp/http'
+
+const acp = createHttpHandler(createAgent, {
+  // Return the caller, or null to answer 401.
+  authenticate: (req) => verifyToken(req.headers.get('authorization')),
+})
+
+createServer((req, res) => (req.url === '/acp' ? acp.node(req, res) : res.writeHead(404).end()))
+  .listen(8080, '127.0.0.1')
+```
+
+`authenticate` is required. An ACP endpoint runs tools, so there is no default
+that lets requests through. It sees every request, including the SSE `GET`, and
+returns a `Principal` (`{ id, ...claims }`) or `null` for 401.
+`acp.fetch(request)` is the same handler for runtimes built on
+`Request`/`Response`.
+
+Each caller only reaches what it created:
+
+- Sessions belong to the `id` that created them. Another caller gets "not
+  found" for prompt, load, resume, close and cancel, and does not see them in
+  `session/list`.
+- Connections belong to the caller that opened them. Another caller presenting
+  that `Acp-Connection-Id` gets a 404.
+- `agentFactory` receives `{ principal }` as its third argument. Scope the
+  agent's session storage by it (a `FileStorage` directory or S3 prefix per
+  tenant) so a session id from one tenant finds nothing in another's.
+- Tools and hooks see the caller on `invocationState.acp.principal`, which is
+  what Cedar's `principalResolver` reads.
+
+Sessions outlive the connection. A client that drops and reconnects with a
+new `initialize` can carry on in the same session with `session/prompt` or
+`session/load`. Messages sent while it was disconnected are not replayed.
+
+The SSE streams are long-lived, so this needs a long-running process. It will
+not work behind API Gateway + Lambda. WebSocket is not exposed yet.
+
 ## API
 
 ### `createStdioServer(config)`
@@ -312,18 +358,30 @@ Creates an ACP stdio server bridging a Strands Agent to the Agent Client Protoco
 - **config** `((sessionId: string) => Agent) | AcpBridgeConfig` - Either a simple factory function or a full configuration object.
 - **Returns** `AgentConnection`
 
-### `createAgentApp(config)`
+### `createHttpHandler(config, options)`
+
+Imported from `@ryancormack/strands-acp/http`. Serves the bridge over ACP Streamable HTTP. See [HTTP transport](#http-transport).
+
+- **config** - same as `createStdioServer`.
+- **options.authenticate** `(request: Request) => Principal | null | Promise<Principal | null>` - required. Called on every request; `null` answers 401.
+- **options** also takes the SDK's `ConnectionLimits` and `maxRequestBodyBytes`.
+- **Returns** `{ fetch, node, close }`. `close()` ends every open connection and leaves sessions in place.
+
+Built on the SDK's `experimental/server`, which may change in a minor SDK release.
+
+### `createAgentApp(config, options?)`
 
 Builds the ACP v1 agent app that `createStdioServer` serves, for use with any other transport. Pass it to `app.connect(stream)`, or as the `agent` of the SDK's `AcpServer`. Every connection the app serves shares the same sessions, so a client that reconnects finds its sessions still there.
 
 - **config** - same as `createStdioServer`.
+- **options.principal** - serve one caller only, with the ownership rules described under [HTTP transport](#http-transport). Give each caller's app the same `config.sessions`.
 - **Returns** `AgentApp`
 
 ### `AcpBridgeConfig`
 
 ```ts
 interface AcpBridgeConfig {
-  agentFactory: (sessionId: string, sessionParams: NewSessionRequest) => Agent
+  agentFactory: (sessionId: string, sessionParams: NewSessionRequest, context: SessionContext) => Agent
   capabilities?: Partial<AgentCapabilities>
   toolKinds?: Record<string, ToolKind>
   permissions?: PermissionPolicy
@@ -337,7 +395,7 @@ interface PermissionPolicy {
 }
 ```
 
-- **agentFactory** — called for each new session and on resume. Receives the session id and the full `NewSessionRequest` params (cwd, mcpServers, etc.).
+- **agentFactory** — called for each new session and on resume. Receives the session id, the full `NewSessionRequest` params (cwd, mcpServers, etc.), and a `SessionContext` carrying the `principal` on transports that authenticate one.
 - **capabilities** — optional partial capabilities merged with defaults and advertised in the `initialize` response.
 - **toolKinds** — explicit tool-name to ACP tool-kind mapping. Any tool not listed has its kind inferred from its name.
 - **permissions** — tool-call approval policy. Omitted means never ask.
@@ -396,6 +454,16 @@ and untested here.
 **`loadSession` restamps timestamps.** `createdAt` and `lastUpdated` are set to
 the load time, not the session's real times, so `listSessions` reports when a
 session was last loaded rather than when it was last used.
+
+**Loading a stored HTTP session trusts the `agentFactory` unless there is a
+`sessionStore`.** With a store, the owner is recorded on each session's record
+(`_meta["strands-acp/owner"]`, stripped before listing) and `session/load` refuses
+any record that is missing, unowned or owned by someone else. Without one, the
+bridge has nothing to check a session on disk against, so a load is only as
+isolated as the factory's storage. Scope that storage by `principal`.
+
+**One `AcpServer` is kept per caller id for the handler's lifetime.** The map
+grows with the number of distinct callers and is only cleared by `close()`.
 
 **`mcpServers` is forwarded, not honoured.** The bridge passes the client's MCP
 server list to the `agentFactory` and does nothing else with it. Connecting
