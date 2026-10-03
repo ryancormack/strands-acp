@@ -951,7 +951,7 @@ describe('AcpAgent', () => {
 
     const session = await clientConn.newSession(sessionParams as any)
 
-    expect(factory).toHaveBeenCalledWith(session.sessionId, sessionParams)
+    expect(factory).toHaveBeenCalledWith(session.sessionId, sessionParams, {})
   })
 
   // -----------------------------------------------------------------------
@@ -983,8 +983,8 @@ describe('AcpAgent', () => {
 
     // Both calls should receive the same session params
     expect(factory).toHaveBeenCalledTimes(2)
-    expect(factory).toHaveBeenNthCalledWith(1, session.sessionId, sessionParams)
-    expect(factory).toHaveBeenNthCalledWith(2, session.sessionId, sessionParams)
+    expect(factory).toHaveBeenNthCalledWith(1, session.sessionId, sessionParams, {})
+    expect(factory).toHaveBeenNthCalledWith(2, session.sessionId, sessionParams, {})
   })
 
   // -----------------------------------------------------------------------
@@ -1252,7 +1252,7 @@ describe('AcpAgent', () => {
 
     // The factory should be called with updated params on resume
     expect(factory).toHaveBeenCalledTimes(2)
-    expect(factory).toHaveBeenNthCalledWith(2, session.sessionId, { cwd: '/updated', mcpServers: [] })
+    expect(factory).toHaveBeenNthCalledWith(2, session.sessionId, { cwd: '/updated', mcpServers: [] }, {})
 
     // Verify the session's cwd was updated (listSessions should find it by new cwd)
     const filtered = await clientConn.listSessions({ cwd: '/updated' })

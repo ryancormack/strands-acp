@@ -4,6 +4,8 @@ import type { PermissionDecision } from './permissions.js'
 
 export interface Session {
   agent: Agent
+  /** `Principal.id` of the caller that created it; undefined on transports without identity. */
+  owner: string | undefined
   /**
    * Decisions remembered from `allow_always` / `reject_always` answers.
    *

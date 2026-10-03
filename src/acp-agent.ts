@@ -23,6 +23,18 @@ import {
   type SessionStore,
 } from './session-store.js'
 
+/** An authenticated caller. `id` is what sessions are owned by; other fields are claims. */
+export interface Principal {
+  id: string
+  [claim: string]: unknown
+}
+
+/** Per-session context handed to `agentFactory`. */
+export interface SessionContext {
+  /** The caller, on transports that authenticate one. Use it to scope session storage per tenant. */
+  principal?: Principal
+}
+
 /**
  * Configuration for the ACP bridge.
  */
@@ -39,7 +51,7 @@ export interface AcpBridgeConfig {
    * The id always matches {@link STRANDS_SESSION_ID_PATTERN}, so it can be used
    * as a storage key without sanitising.
    */
-  agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
+  agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest, context: SessionContext) => Agent
   /** Optional capabilities to advertise during initialization. Merged with defaults. */
   capabilities?: Partial<acp.AgentCapabilities>
   /**
@@ -99,22 +111,42 @@ function generateSessionId(): string {
 
 type Client = acp.AgentContext
 
+/** Where a session's owner is kept on the record a `SessionStore` saves. */
+export const OWNER_META_KEY = 'strands-acp/owner'
+
+function storedOwner(info: acp.SessionInfo | undefined): string | undefined {
+  const owner = info?._meta?.[OWNER_META_KEY]
+  return typeof owner === 'string' ? owner : undefined
+}
+
+/** The owner id stays server-side; it is not the client's to see. */
+function withoutOwner(info: acp.SessionInfo): acp.SessionInfo {
+  if (!info._meta || !(OWNER_META_KEY in info._meta)) return info
+  const { [OWNER_META_KEY]: _owner, ...meta } = info._meta
+  const { _meta: _ignored, ...rest } = info
+  return Object.keys(meta).length > 0 ? { ...rest, _meta: meta } : rest
+}
+
 /**
  * Translates ACP v1 requests into Strands agent calls. Holds no connection:
  * each handler is given the client of the connection the request arrived on.
  */
 export class AcpAgent {
   private sessions: SessionRegistry
-  private agentFactory: (sessionId: string, sessionParams: acp.NewSessionRequest) => Agent
+  private agentFactory: AcpBridgeConfig['agentFactory']
   private capabilitiesConfig: Partial<acp.AgentCapabilities> | undefined
   private toolKinds: Record<string, acp.ToolKind> | undefined
   private permissions: PermissionPolicy | undefined
   private sessionStore: SessionStore | undefined
+  private principal: Principal | undefined
+  private context: SessionContext
 
-  constructor(config: ((sessionId: string) => Agent) | AcpBridgeConfig) {
+  constructor(config: ((sessionId: string) => Agent) | AcpBridgeConfig, principal?: Principal) {
+    this.principal = principal
+    this.context = principal ? { principal } : {}
     if (typeof config === 'function') {
       // Backwards-compatible: simple factory function (ignores second param)
-      this.agentFactory = (sessionId: string, _sessionParams: acp.NewSessionRequest) => config(sessionId)
+      this.agentFactory = (sessionId: string) => config(sessionId)
       this.capabilitiesConfig = undefined
       this.toolKinds = undefined
       this.permissions = undefined
@@ -169,7 +201,8 @@ export class AcpAgent {
   async newSession(params: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
     const sessionId = generateSessionId()
     this.sessions.set(sessionId, {
-      agent: this.agentFactory(sessionId, params),
+      agent: this.agentFactory(sessionId, params, this.context),
+      owner: this.principal?.id,
       permissionOverrides: new Map(),
       abortController: null,
       cwd: params.cwd,
@@ -182,22 +215,45 @@ export class AcpAgent {
     return { sessionId }
   }
 
+  /** Another caller's session reads as not found, so its existence is not disclosed. */
+  private ownedSession(sessionId: string): Session | undefined {
+    const session = this.sessions.get(sessionId)
+    return session && session.owner === this.principal?.id ? session : undefined
+  }
+
   async loadSession(params: acp.LoadSessionRequest, client: Client): Promise<acp.LoadSessionResponse> {
+    const owner = this.principal?.id
+    const live = this.sessions.get(params.sessionId)
+    if (live && live.owner !== owner) throw acp.RequestError.resourceNotFound(params.sessionId)
+
+    let stored: acp.SessionInfo | undefined
+    if (this.sessionStore) {
+      try {
+        stored = (await this.sessionStore.list({})).find((info) => info.sessionId === params.sessionId)
+      } catch (err) {
+        // Without the record, ownership cannot be checked.
+        if (owner !== undefined) throw err
+        process.stderr.write(`strands-acp: could not read stored session ${params.sessionId}: ${String(err)}\n`)
+      }
+      if (owner !== undefined && storedOwner(stored) !== owner) {
+        throw acp.RequestError.resourceNotFound(params.sessionId)
+      }
+    }
+
     const sessionParams = { cwd: params.cwd, mcpServers: params.mcpServers } as acp.NewSessionRequest
-    const agent = this.agentFactory(params.sessionId, sessionParams)
+    const agent = this.agentFactory(params.sessionId, sessionParams, this.context)
     this.sessions.set(params.sessionId, {
       agent,
+      owner,
       permissionOverrides: new Map(),
       abortController: null,
       cwd: params.cwd,
       createdAt: new Date(),
       lastUpdated: new Date(),
-      title: null,
+      // A stored title is the only human-readable label a reloaded session has.
+      title: stored?.title ?? null,
       params: sessionParams,
     })
-
-    // A stored title is the only human-readable label a reloaded session has.
-    await this.adoptStoredTitle(params.sessionId)
 
     // Replay conversation history to the client via session updates.
     await this.replayHistory(params.sessionId, agent, client)
@@ -378,7 +434,7 @@ export class AcpAgent {
   }
 
   async closeSession(params: acp.CloseSessionRequest): Promise<acp.CloseSessionResponse> {
-    const session = this.sessions.get(params.sessionId)
+    const session = this.ownedSession(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
     session.agent.cancel()
     session.abortController?.abort()
@@ -393,6 +449,7 @@ export class AcpAgent {
       cwd: session.cwd,
       title: session.title,
       updatedAt: session.lastUpdated.toISOString(),
+      ...(session.owner !== undefined ? { _meta: { [OWNER_META_KEY]: session.owner } } : {}),
     }
   }
 
@@ -413,56 +470,40 @@ export class AcpAgent {
     }
   }
 
-  /**
-   * Restores a session's title from the store.
-   *
-   * `loadSession` builds a fresh in-memory session, which would otherwise reset
-   * the title to null and leave a reloaded session unlabelled in the client's
-   * picker. Looked up through `list` rather than a dedicated getter to keep the
-   * store interface at three methods; the scan is over session metadata, not
-   * conversation history.
-   */
-  private async adoptStoredTitle(sessionId: string): Promise<void> {
-    const session = this.sessions.get(sessionId)
-    if (!session || !this.sessionStore) return
-    try {
-      const stored = await this.sessionStore.list({})
-      const match = stored.find((info) => info.sessionId === sessionId)
-      if (match?.title) session.title = match.title
-    } catch (err) {
-      process.stderr.write(`strands-acp: could not read stored session ${sessionId}: ${String(err)}\n`)
-    }
-  }
-
   async listSessions(params: acp.ListSessionsRequest): Promise<acp.ListSessionsResponse> {
-    const live = [...this.sessions.entries()].map(([sessionId, session]) => this.sessionInfo(sessionId, session))
+    const owner = this.principal?.id
+    const live = [...this.sessions.entries()]
+      .filter(([, session]) => session.owner === owner)
+      .map(([sessionId, session]) => this.sessionInfo(sessionId, session))
 
     if (!this.sessionStore) {
-      return { sessions: mergeSessionInfos(live, [], params.cwd) }
+      return { sessions: mergeSessionInfos(live, [], params.cwd).map(withoutOwner) }
     }
 
     // A store failure propagates rather than degrading to the live-only list: an
     // empty result reads to the client as "no sessions exist", which would be a
     // wrong answer rather than a partial one.
-    const stored = await this.sessionStore.list({ cwd: params.cwd })
-    return { sessions: mergeSessionInfos(live, stored, params.cwd) }
+    const stored = (await this.sessionStore.list({ cwd: params.cwd })).filter(
+      (info) => owner === undefined || storedOwner(info) === owner,
+    )
+    return { sessions: mergeSessionInfos(live, stored, params.cwd).map(withoutOwner) }
   }
 
   async resumeSession(params: acp.ResumeSessionRequest): Promise<acp.ResumeSessionResponse> {
-    const session = this.sessions.get(params.sessionId)
+    const session = this.ownedSession(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
     // Update cwd if the resume request provides one, preserving original params otherwise
     if (params.cwd) {
       session.cwd = params.cwd
       session.params = { ...session.params, cwd: params.cwd }
     }
-    session.agent = this.agentFactory(params.sessionId, session.params)
+    session.agent = this.agentFactory(params.sessionId, session.params, this.context)
     await this.persistSession(params.sessionId, session)
     return {}
   }
 
   async prompt(params: acp.PromptRequest, client: Client): Promise<acp.PromptResponse> {
-    const session = this.sessions.get(params.sessionId)
+    const session = this.ownedSession(params.sessionId)
     if (!session) throw acp.RequestError.resourceNotFound(params.sessionId)
 
     // The first prompt is the only human-readable thing the bridge ever learns
@@ -474,7 +515,14 @@ export class AcpAgent {
     const { signal } = session.abortController
 
     const input = toStrandsInput(params.prompt)
-    const result = await runTurn(session.agent, input, signal, this.v1TurnSink(params.sessionId, session, client))
+    const invocationState = { acp: { sessionId: params.sessionId, ...this.context } }
+    const result = await runTurn(
+      session.agent,
+      input,
+      signal,
+      this.v1TurnSink(params.sessionId, session, client),
+      invocationState,
+    )
     if (result.outcome === 'aborted') return { stopReason: 'cancelled' }
 
     session.abortController = null
@@ -568,7 +616,7 @@ export class AcpAgent {
   }
 
   async cancel(params: acp.CancelNotification): Promise<void> {
-    const session = this.sessions.get(params.sessionId)
+    const session = this.ownedSession(params.sessionId)
     if (session) {
       session.agent.cancel()
       session.abortController?.abort()
@@ -580,9 +628,16 @@ export class AcpAgent {
  * Builds an ACP v1 agent app for a Strands agent. Serve it with
  * `app.connect(stream)`, or hand it to the SDK's `AcpServer` or protocol
  * router; every connection it serves shares one set of sessions.
+ *
+ * With `options.principal`, the app serves that caller only: it sees and
+ * touches only sessions it created. Give one app per caller the same
+ * `config.sessions` registry.
  */
-export function createAgentApp(config: ((sessionId: string) => Agent) | AcpBridgeConfig): acp.AgentApp {
-  const bridge = new AcpAgent(config)
+export function createAgentApp(
+  config: ((sessionId: string) => Agent) | AcpBridgeConfig,
+  options: { principal?: Principal } = {},
+): acp.AgentApp {
+  const bridge = new AcpAgent(config, options.principal)
 
   return acp
     .agent({ name: 'strands-acp' })
