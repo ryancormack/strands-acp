@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'
 import * as acp from '@agentclientprotocol/sdk'
 
 import type { Agent } from '@strands-agents/sdk'
@@ -22,6 +23,9 @@ import {
   STRANDS_SESSION_ID_PATTERN,
   type SessionStore,
 } from './session-store.js'
+
+// Resolves to the package root from both src/ and dist/.
+const { version: PACKAGE_VERSION } = createRequire(import.meta.url)('../package.json') as { version: string }
 
 /** An authenticated caller. `id` is what sessions are owned by; other fields are claims. */
 export interface Principal {
@@ -193,7 +197,7 @@ export class AcpAgent {
       agentCapabilities: mergedCapabilities,
       agentInfo: {
         name: 'strands-acp-agent',
-        version: '0.1.0',
+        version: PACKAGE_VERSION,
       },
     }
   }
