@@ -3,38 +3,32 @@
 [![npm version](https://img.shields.io/npm/v/@ryancormack/strands-acp.svg)](https://www.npmjs.com/package/@ryancormack/strands-acp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Bridge any [Strands](https://github.com/strands-agents/sdk-typescript) agent to the [Agent Client Protocol (ACP)](https://agentclientprotocol.org/).
+Bridge any [Strands](https://github.com/strands-agents/sdk-typescript) agent to the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/).
 
 ## Requirements
 
 - Node.js >= 22
-- `@strands-agents/sdk` is a peer dependency and must be installed in your project
+- `@strands-agents/sdk` 1.x, as a peer dependency
 
 ## Installation
 
 ```bash
-pnpm add @ryancormack/strands-acp @agentclientprotocol/sdk
+pnpm add @ryancormack/strands-acp @strands-agents/sdk
 ```
 
 Or using npm:
 
 ```bash
-npm install @ryancormack/strands-acp @agentclientprotocol/sdk
+npm install @ryancormack/strands-acp @strands-agents/sdk
 ```
 
 Or using yarn:
 
 ```bash
-yarn add @ryancormack/strands-acp @agentclientprotocol/sdk
+yarn add @ryancormack/strands-acp @strands-agents/sdk
 ```
 
-> **Note:** `@strands-agents/sdk` is a peer dependency. Make sure it is installed in your project:
->
-> ```bash
-> pnpm add @strands-agents/sdk
-> # or: npm install @strands-agents/sdk
-> # or: yarn add @strands-agents/sdk
-> ```
+`@agentclientprotocol/sdk` is a regular dependency and installs with the bridge. Add it yourself only if you import its types directly.
 
 ## Usage
 
@@ -44,10 +38,10 @@ The simplest way to expose a Strands agent over ACP is with the stdio transport:
 
 ```ts
 import { createStdioServer } from '@ryancormack/strands-acp'
-import { agent } from '@strands-agents/sdk'
+import { Agent } from '@strands-agents/sdk'
 
 function createAgent(_sessionId: string) {
-  return agent({ model: myModel, tools: myTools })
+  return new Agent({ model: myModel, tools: myTools })
 }
 
 createStdioServer(createAgent)
@@ -61,13 +55,13 @@ For more control, pass an `AcpBridgeConfig` object. This lets you configure capa
 
 ```ts
 import { createStdioServer, type AcpBridgeConfig } from '@ryancormack/strands-acp'
-import { agent } from '@strands-agents/sdk'
+import { Agent } from '@strands-agents/sdk'
 
 const config: AcpBridgeConfig = {
   agentFactory: (sessionId, sessionParams) => {
-    // sessionParams includes cwd, mcpServers, additionalDirectories, etc.
-    console.log(`Creating agent for session ${sessionId} in ${sessionParams.cwd}`)
-    return agent({ model: myModel, tools: myTools })
+    // stdout carries the protocol, so log to stderr
+    console.error(`Creating agent for session ${sessionId} in ${sessionParams.cwd}`)
+    return new Agent({ model: myModel, tools: myTools })
   },
   capabilities: {
     promptCapabilities: { image: true },
@@ -115,7 +109,7 @@ The agent factory is responsible for restoring conversation state when given a k
 const config: AcpBridgeConfig = {
   agentFactory: (sessionId) => {
     // The agent restores its messages from a persistent store
-    return agent({
+    return new Agent({
       model: myModel,
       tools: myTools,
       sessionManager: new PersistentSessionManager(sessionId),
@@ -175,7 +169,7 @@ first turn was image-only stays untitled.
 #### Tool kinds
 
 ACP clients use a tool's `kind` to choose an icon and decide how to render
-progress — an `edit` renders a diff, a `read` renders a file link. The kind is
+progress: an `edit` renders a diff, a `read` renders a file link. The kind is
 inferred from the tool name, and falls back to `other` (the ACP default) rather
 than mislabelling everything as `execute`:
 
@@ -242,9 +236,9 @@ createStdioServer({
 
 Each decision is one of:
 
-- `allow` — run without asking.
-- `ask` — send `session/request_permission` and wait for the user.
-- `deny` — refuse without asking the client.
+- `allow`: run without asking.
+- `ask`: send `session/request_permission` and wait for the user.
+- `deny`: refuse without asking the client.
 
 The client is offered the four ACP option kinds (`allow_once`, `allow_always`,
 `reject_once`, `reject_always`). An `allow_always` or `reject_always` answer is
@@ -303,6 +297,52 @@ assistant message, so clients can collapse them separately from the answer.
 `session/cancel` aborts the in-flight prompt and releases the agent's stream, so
 the agent's own cleanup runs rather than being left pending.
 
+### HTTP transport
+
+`createHttpHandler` serves the bridge over ACP Streamable HTTP: one endpoint
+taking `POST` for client messages, `GET` for the SSE streams the agent answers
+on, and `DELETE` to end a connection. It is a handler, not a server. You mount
+it at the path clients connect to, and TLS, binding and routing stay yours.
+
+```ts
+import { createServer } from 'node:http'
+import { createHttpHandler } from '@ryancormack/strands-acp/http'
+
+const acp = createHttpHandler(createAgent, {
+  // Return the caller, or null to answer 401.
+  authenticate: (req) => verifyToken(req.headers.get('authorization')),
+})
+
+createServer((req, res) => (req.url === '/acp' ? acp.node(req, res) : res.writeHead(404).end()))
+  .listen(8080, '127.0.0.1')
+```
+
+`authenticate` is required. An ACP endpoint runs tools, so there is no default
+that lets requests through. It sees every request, including the SSE `GET`, and
+returns a `Principal` (`{ id, ...claims }`) or `null` for 401.
+`acp.fetch(request)` is the same handler for runtimes built on
+`Request`/`Response`.
+
+Each caller only reaches what it created:
+
+- Sessions belong to the `id` that created them. Another caller gets "not
+  found" for prompt, load, resume, close and cancel, and does not see them in
+  `session/list`.
+- Connections belong to the caller that opened them. Another caller presenting
+  that `Acp-Connection-Id` gets a 404.
+- `agentFactory` receives `{ principal }` as its third argument. Scope the
+  agent's session storage by it (a `FileStorage` directory or S3 prefix per
+  tenant) so a session id from one tenant finds nothing in another's.
+- Tools and hooks see the caller on `invocationState.acp.principal`, which is
+  what Cedar's `principalResolver` reads.
+
+Sessions outlive the connection. A client that drops and reconnects with a
+new `initialize` can carry on in the same session with `session/prompt` or
+`session/load`. Messages sent while it was disconnected are not replayed.
+
+The SSE streams are long-lived, so this needs a long-running process. It will
+not work behind API Gateway + Lambda. WebSocket is not exposed yet.
+
 ## API
 
 ### `createStdioServer(config)`
@@ -312,18 +352,34 @@ Creates an ACP stdio server bridging a Strands Agent to the Agent Client Protoco
 - **config** `((sessionId: string) => Agent) | AcpBridgeConfig` - Either a simple factory function or a full configuration object.
 - **Returns** `AgentConnection`
 
-### `createAgentApp(config)`
+### `createHttpHandler(config, options)`
+
+Imported from `@ryancormack/strands-acp/http`. Serves the bridge over ACP Streamable HTTP. See [HTTP transport](#http-transport).
+
+- **config** - same as `createStdioServer`.
+- **options.authenticate** `(request: Request) => Principal | null | Promise<Principal | null>` - required. Called on every request; `null` answers 401.
+- **options** also takes the SDK's `ConnectionLimits` and `maxRequestBodyBytes`.
+- **Returns** `{ fetch, node, close }`. `close()` ends every open connection and leaves sessions in place.
+
+Built on the SDK's `experimental/server`, which may change in a minor SDK release.
+
+### `createAgentApp(config, options?)`
 
 Builds the ACP v1 agent app that `createStdioServer` serves, for use with any other transport. Pass it to `app.connect(stream)`, or as the `agent` of the SDK's `AcpServer`. Every connection the app serves shares the same sessions, so a client that reconnects finds its sessions still there.
 
 - **config** - same as `createStdioServer`.
+- **options.principal** - serve one caller only, with the ownership rules described under [HTTP transport](#http-transport). Give each caller's app the same `config.sessions`.
 - **Returns** `AgentApp`
+
+### `SessionRegistry`
+
+Holds live sessions. Pass one instance as `config.sessions` to several apps or handlers so they share sessions.
 
 ### `AcpBridgeConfig`
 
 ```ts
 interface AcpBridgeConfig {
-  agentFactory: (sessionId: string, sessionParams: NewSessionRequest) => Agent
+  agentFactory: (sessionId: string, sessionParams: NewSessionRequest, context: SessionContext) => Agent
   capabilities?: Partial<AgentCapabilities>
   toolKinds?: Record<string, ToolKind>
   permissions?: PermissionPolicy
@@ -337,26 +393,12 @@ interface PermissionPolicy {
 }
 ```
 
-- **agentFactory** — called for each new session and on resume. Receives the session id and the full `NewSessionRequest` params (cwd, mcpServers, etc.).
-- **capabilities** — optional partial capabilities merged with defaults and advertised in the `initialize` response.
-- **toolKinds** — explicit tool-name to ACP tool-kind mapping. Any tool not listed has its kind inferred from its name.
-- **permissions** — tool-call approval policy. Omitted means never ask.
-- **sessionStore** — durable store for ACP session metadata. Omitted means `session/list` reports only sessions this process created.
-- **sessions** — where live sessions are held. Omitted means each app keeps its own. Pass one `SessionRegistry` to several apps to share sessions between them.
-
-### `AcpAgent`
-
-The core class, translating ACP requests into Strands agent interactions. It handles:
-
-- Session lifecycle (create, list, resume, close)
-- Prompt streaming with text, image, and tool call events
-- Content block mapping (ACP to Strands types)
-- Cancellation
-- Stop reason mapping between Strands and ACP conventions
-
-Some of these are narrower than the list suggests. See [Known gaps](#known-gaps).
-
-It is internal. Use `createStdioServer` for the standard transport, or `createAgentApp` for any other.
+- **agentFactory**: called for each new session, load and resume. Receives the session id, the full `NewSessionRequest` params (cwd, mcpServers, etc.), and a `SessionContext` carrying the `principal` on transports that authenticate one.
+- **capabilities**: optional partial capabilities merged with defaults and advertised in the `initialize` response.
+- **toolKinds**: explicit tool-name to ACP tool-kind mapping. Any tool not listed has its kind inferred from its name.
+- **permissions**: tool-call approval policy. Omitted means never ask.
+- **sessionStore**: durable store for ACP session metadata. Omitted means `session/list` reports only sessions this process created.
+- **sessions**: where live sessions are held. Omitted means each app keeps its own. Pass one `SessionRegistry` to several apps to share sessions between them.
 
 ## Known gaps
 
@@ -372,10 +414,11 @@ implementation is to map a mode onto a `PermissionPolicy` and swap the active
 policy. Until then a client cannot express "plan mode denies every mutating
 tool".
 
-**`authenticate` always succeeds.** It returns an empty response without
-checking anything. No `authMethods` are advertised, so a client should never
-call it, but the default fails open rather than closed. An agent that needs
-authentication must not rely on this method as written.
+**The ACP `authenticate` method always succeeds.** It returns an empty response
+without checking anything. No `authMethods` are advertised, so a client should
+never call it, but the default fails open rather than closed. This is the
+protocol method, not the HTTP transport's `authenticate` option, which does
+check every request.
 
 **`listSessions` needs a `sessionStore` to see past the current process.**
 Without one it iterates the in-memory map only, so it returns an empty list after
@@ -396,6 +439,16 @@ and untested here.
 **`loadSession` restamps timestamps.** `createdAt` and `lastUpdated` are set to
 the load time, not the session's real times, so `listSessions` reports when a
 session was last loaded rather than when it was last used.
+
+**Loading a stored HTTP session trusts the `agentFactory` unless there is a
+`sessionStore`.** With a store, the owner is recorded on each session's record
+(`_meta["strands-acp/owner"]`, stripped before listing) and `session/load` refuses
+any record that is missing, unowned or owned by someone else. Without one, the
+bridge has nothing to check a session on disk against, so a load is only as
+isolated as the factory's storage. Scope that storage by `principal`.
+
+**One `AcpServer` is kept per caller id for the handler's lifetime.** The map
+grows with the number of distinct callers and is only cleared by `close()`.
 
 **`mcpServers` is forwarded, not honoured.** The bridge passes the client's MCP
 server list to the `agentFactory` and does nothing else with it. Connecting

@@ -39,10 +39,11 @@ export async function runTurn(
   input: StrandsInput,
   signal: AbortSignal,
   sink: TurnSink,
+  invocationState?: Record<string, unknown>,
 ): Promise<TurnResult> {
   let cancelledByGate = false
   let stopReason: string | undefined
-  const gen = agent.stream(input)
+  const gen = invocationState ? agent.stream(input, { invocationState }) : agent.stream(input)
 
   try {
     let iterResult = await gen.next()
