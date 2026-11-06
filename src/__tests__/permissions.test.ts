@@ -374,14 +374,49 @@ describe('AcpAgent permission gating', () => {
     expect(announces).toHaveLength(1)
     expect(executed).toEqual(['bash'])
 
-    // The gate's pending state still reaches the client, as an update.
-    const pending = client.updates.filter(
-      (u) => (u.update as never as { status?: string }).status === 'pending',
-    )
-    expect(pending.length).toBeGreaterThan(0)
-    expect(
-      (pending[0].update as never as { sessionUpdate?: string }).sessionUpdate,
-    ).toBe('tool_call_update')
+    // Status only moves forward: pending while streaming and awaiting approval, then running, then done.
+    const statuses = client.updates
+      .map((u) => u.update as never as { sessionUpdate?: string; status?: string })
+      .filter((u) => u.sessionUpdate?.startsWith('tool_call'))
+      .map((u) => `${u.sessionUpdate}:${u.status}`)
+    expect(statuses).toEqual([
+      'tool_call:pending',
+      'tool_call_update:pending',
+      'tool_call_update:in_progress',
+      'tool_call_update:completed',
+    ])
+  })
+
+  it('moves an ungated call the stream announced from pending to in_progress', async () => {
+    const toolUse = { toolUseId: 'open-1', name: 'read', input: { path: '/a' } }
+    const agent = {
+      messages: [],
+      stream: async function* () {
+        yield {
+          type: 'modelStreamUpdateEvent',
+          event: {
+            type: 'modelContentBlockStartEvent',
+            start: { type: 'toolUseStart', name: toolUse.name, toolUseId: toolUse.toolUseId },
+          },
+        } as never
+        yield { type: 'beforeToolCallEvent', toolUse } as never
+        yield { type: 'afterToolCallEvent', toolUse, result: { content: [] } } as never
+        return { stopReason: 'endTurn' } as never
+      },
+      cancel: vi.fn(),
+    } as unknown as Agent
+
+    const client = new PermissionClient([])
+    const clientConn = connect({ agentFactory: () => agent }, client)
+    const { sessionId } = await startSession(clientConn)
+    await clientConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const statuses = client.updates
+      .map((u) => u.update as never as { sessionUpdate?: string; status?: string })
+      .filter((u) => u.sessionUpdate?.startsWith('tool_call'))
+      .map((u) => `${u.sessionUpdate}:${u.status}`)
+    expect(statuses).toEqual(['tool_call:pending', 'tool_call_update:in_progress', 'tool_call_update:completed'])
+    expect(client.requests).toHaveLength(0)
   })
 
   it('sends one tool_call when the stream did not announce first', async () => {

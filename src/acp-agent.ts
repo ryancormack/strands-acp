@@ -415,10 +415,8 @@ export class AcpAgent {
     const outcome = interpretPermissionResponse(response)
     if (outcome.remember) session.permissionOverrides.set(event.toolUse.name, outcome.remember)
 
-    if (outcome.allowed) {
-      await send({ sessionUpdate: 'tool_call_update', toolCallId: event.toolUse.toolUseId, status: 'in_progress' })
-      return { outcome: 'allowed', announced: true }
-    }
+    // The caller moves an allowed call to in_progress.
+    if (outcome.allowed) return { outcome: 'allowed', announced: true }
 
     event.cancel = outcome.cancelled
       ? 'The user cancelled this request.'
@@ -555,7 +553,8 @@ export class AcpAgent {
           toolCallId: toolUseId,
           title: name,
           kind: inferToolKind(name, this.toolKinds),
-          status: 'in_progress',
+          // Input is still streaming and the call may yet need approval.
+          status: 'pending',
           rawInput: {},
         })
       },
@@ -588,6 +587,7 @@ export class AcpAgent {
           await send({
             sessionUpdate: 'tool_call_update',
             toolCallId: toolUse.toolUseId,
+            status: 'in_progress',
             rawInput: toolUse.input as Record<string, unknown>,
             ...locationField,
           })
