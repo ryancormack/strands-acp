@@ -12,6 +12,7 @@ import {
 import { createAgentApp, type AcpBridgeConfig } from '../acp-agent.js'
 import { STRANDS_SESSION_ID_PATTERN, type SessionStore } from '../session-store.js'
 import { TextBlock, ImageBlock, type Agent } from '@strands-agents/sdk'
+import packageJson from '../../package.json' with { type: 'json' }
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -123,6 +124,7 @@ describe('AcpAgent', () => {
     expect(response.agentCapabilities?.sessionCapabilities?.list).toEqual({})
     expect(response.agentCapabilities?.sessionCapabilities?.resume).toEqual({})
     expect(response.agentInfo?.name).toBe('strands-acp-agent')
+    expect(response.agentInfo?.version).toBe(packageJson.version)
   })
 
   // -----------------------------------------------------------------------
