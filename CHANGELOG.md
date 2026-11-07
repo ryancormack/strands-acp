@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/ryancormack/strands-acp/compare/v0.2.0...v0.3.0) (2026-11-07)
+
+
+### Features
+
+* serve the bridge over ACP Streamable HTTP ([#26](https://github.com/ryancormack/strands-acp/issues/26)) ([7da0b20](https://github.com/ryancormack/strands-acp/commit/7da0b204933f4abfba30a5f04155e79238dc1747))
+
+
+### Bug Fixes
+
+* keep tool call status moving forward ([#29](https://github.com/ryancormack/strands-acp/issues/29)) ([b71fd8e](https://github.com/ryancormack/strands-acp/commit/b71fd8e4369c9aaccfcf9f50382d73d54c25c250))
+* report the package version in agentInfo ([#28](https://github.com/ryancormack/strands-acp/issues/28)) ([c15bf80](https://github.com/ryancormack/strands-acp/commit/c15bf8016199d197fb45109fb0edd5b724cdceeb))
+
 ## [0.2.0](https://github.com/ryancormack/strands-acp/compare/v0.1.1...v0.2.0) (2026-10-02)
 
 
