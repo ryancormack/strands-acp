@@ -1,13 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
-  ClientSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
-  type Client,
   type SessionNotification,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from '@agentclientprotocol/sdk'
+import { connectClient, type Client } from './support/client.js'
 import {
   Agent,
   Model,
@@ -128,10 +127,7 @@ function buildHarness(
   const clientToAgent = new TransformStream()
   const agentToClient = new TransformStream()
 
-  const clientConn = new ClientSideConnection(
-    () => client,
-    ndJsonStream(clientToAgent.writable, agentToClient.readable),
-  )
+  const clientConn = connectClient(client, ndJsonStream(clientToAgent.writable, agentToClient.readable))
 
   createAgentApp({
     agentFactory: () =>

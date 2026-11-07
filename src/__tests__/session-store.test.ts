@@ -1,12 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
-  ClientSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
-  type Client,
   type SessionNotification,
   type SessionInfo,
 } from '@agentclientprotocol/sdk'
+import { connectClient, type Client, type ClientConnection } from './support/client.js'
 import { createAgentApp, type AcpBridgeConfig } from '../acp-agent.js'
 import type { Agent } from '@strands-agents/sdk'
 import { mergeSessionInfos, deriveTitle, type SessionStore } from '../session-store.js'
@@ -48,15 +47,12 @@ function createMockAgent(): Agent {
 function connect(config: AcpBridgeConfig, client: Client) {
   const clientToAgent = new TransformStream()
   const agentToClient = new TransformStream()
-  const clientConn = new ClientSideConnection(
-    () => client,
-    ndJsonStream(clientToAgent.writable, agentToClient.readable),
-  )
+  const clientConn = connectClient(client, ndJsonStream(clientToAgent.writable, agentToClient.readable))
   createAgentApp(config).connect(ndJsonStream(agentToClient.writable, clientToAgent.readable))
   return clientConn
 }
 
-async function init(clientConn: ClientSideConnection) {
+async function init(clientConn: ClientConnection) {
   await clientConn.initialize({
     protocolVersion: PROTOCOL_VERSION,
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
