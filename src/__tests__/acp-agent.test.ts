@@ -1,14 +1,13 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest'
 import {
-  ClientSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
   type AgentConnection,
-  type Client,
   type SessionNotification,
   type NewSessionRequest,
   type SessionInfo,
 } from '@agentclientprotocol/sdk'
+import { connectClient, type Client, type ClientConnection } from './support/client.js'
 import { createAgentApp, type AcpBridgeConfig } from '../acp-agent.js'
 import { STRANDS_SESSION_ID_PATTERN, type SessionStore } from '../session-store.js'
 import { TextBlock, ImageBlock, type Agent } from '@strands-agents/sdk'
@@ -74,7 +73,7 @@ function createConnectionPair(
   config: ((sessionId: string) => Agent) | AcpBridgeConfig,
   testClient?: TestClient,
 ): {
-  clientConn: ClientSideConnection
+  clientConn: ClientConnection
   agentConn: AgentConnection
   client: TestClient
 } {
@@ -82,10 +81,7 @@ function createConnectionPair(
   const agentToClient = new TransformStream()
   const client = testClient ?? new TestClient()
 
-  const clientConn = new ClientSideConnection(
-    () => client,
-    ndJsonStream(clientToAgent.writable, agentToClient.readable),
-  )
+  const clientConn = connectClient(client, ndJsonStream(clientToAgent.writable, agentToClient.readable))
   const agentConn = createAgentApp(config).connect(ndJsonStream(agentToClient.writable, clientToAgent.readable))
 
   return { clientConn, agentConn, client }

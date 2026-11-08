@@ -2,11 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import {
-  ClientSideConnection,
   PROTOCOL_VERSION,
-  type Client,
   type SessionNotification,
 } from '@agentclientprotocol/sdk'
+import { connectClient, type Client } from './support/client.js'
 import { createHttpStream } from '@agentclientprotocol/sdk/experimental/http-client'
 import type { Agent } from '@strands-agents/sdk'
 import { createHttpHandler, type AcpHttpHandler } from '../http.js'
@@ -56,7 +55,7 @@ const bearerAuth = (request: Request): Principal | null =>
   PRINCIPALS[request.headers.get('authorization')?.replace(/^Bearer /, '') ?? ''] ?? null
 
 async function connect(url: string, client: Client, as = 'alice') {
-  const conn = new ClientSideConnection(() => client, createHttpStream(url, { headers: authAs(as) }))
+  const conn = connectClient(client, createHttpStream(url, { headers: authAs(as) }))
   await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
   return conn
 }
@@ -148,9 +147,13 @@ describe('createHttpHandler ownership', () => {
     const { sessionId } = await alice.newSession({ cwd: '/project', mcpServers: [] })
 
     await expect(bob.prompt({ sessionId, prompt: [{ type: 'text', text: 'hi' }] })).rejects.toThrow()
-    await expect(bob.closeSession({ sessionId })).rejects.toThrow()
+    // The bridge answers -32002, which SDK clients report as a successful close.
+    await bob.closeSession({ sessionId })
     expect((await bob.listSessions({})).sessions).toEqual([])
     expect((await alice.listSessions({})).sessions.map((s) => s.sessionId)).toEqual([sessionId])
+    await expect(alice.prompt({ sessionId, prompt: [{ type: 'text', text: 'still mine' }] })).resolves.toMatchObject({
+      stopReason: 'end_turn',
+    })
   })
 
   it("answers 404 to a caller presenting another caller's connection id", async () => {
