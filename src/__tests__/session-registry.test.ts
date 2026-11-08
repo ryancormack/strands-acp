@@ -1,12 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
-  ClientSideConnection,
   PROTOCOL_VERSION,
   ndJsonStream,
   type AgentApp,
-  type Client,
   type SessionNotification,
 } from '@agentclientprotocol/sdk'
+import { connectClient, type Client } from './support/client.js'
 import { AcpServer } from '@agentclientprotocol/sdk/experimental/server'
 import type { Agent } from '@strands-agents/sdk'
 import { createAgentApp } from '../acp-agent.js'
@@ -39,7 +38,7 @@ function createMockAgent(): Agent {
 async function connect(app: AgentApp, client: Client) {
   const clientToAgent = new TransformStream()
   const agentToClient = new TransformStream()
-  const conn = new ClientSideConnection(() => client, ndJsonStream(clientToAgent.writable, agentToClient.readable))
+  const conn = connectClient(client, ndJsonStream(clientToAgent.writable, agentToClient.readable))
   app.connect(ndJsonStream(agentToClient.writable, clientToAgent.readable))
   await conn.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
   return conn
