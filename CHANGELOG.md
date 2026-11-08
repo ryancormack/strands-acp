@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/ryancormack/strands-acp/compare/v0.3.0...v0.4.0) (2026-11-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **deps:** createAgentApp, createStdioServer and createHttpHandler now expose @agentclientprotocol/sdk 2.x types. Code that passes them to SDK 1.x APIs must upgrade the SDK too. The `capabilities` option now uses the SDK's stable types, so `providers`, `nes`, `positionEncoding` and `sessionCapabilities.fork` are rejected in a typed object literal. They are still passed through at runtime.
+
+### Bug Fixes
+
+* **deps:** upgrade @agentclientprotocol/sdk to ^2.4.0 ([#30](https://github.com/ryancormack/strands-acp/issues/30)) ([03d419d](https://github.com/ryancormack/strands-acp/commit/03d419da6da4210ec6f23184ee181a73a8f1fb6d))
+
 ## [0.3.0](https://github.com/ryancormack/strands-acp/compare/v0.2.0...v0.3.0) (2026-11-07)
 
 
