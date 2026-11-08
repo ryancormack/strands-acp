@@ -96,7 +96,8 @@ describe('session ownership', () => {
     const agentToClient = new TransformStream<Uint8Array, Uint8Array>()
     bob.connect(ndJsonStream(agentToClient.writable, clientToAgent.readable))
     const writer = clientToAgent.writable.getWriter()
-    const reader = agentToClient.readable.pipeThrough(new TextDecoderStream()).getReader()
+    const reader = agentToClient.readable.getReader()
+    const decoder = new TextDecoder()
     const send = (message: object) => writer.write(new TextEncoder().encode(`${JSON.stringify(message)}\n`))
     let buffered = ''
     const response = async (id: number) => {
@@ -107,7 +108,7 @@ describe('session ownership', () => {
         }
         const { value, done } = await reader.read()
         if (done) throw new Error(`stream ended before response ${id}`)
-        buffered += value
+        buffered += decoder.decode(value, { stream: true })
       }
     }
 
