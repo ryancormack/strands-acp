@@ -28,7 +28,7 @@ Or using yarn:
 yarn add @ryancormack/strands-acp @strands-agents/sdk
 ```
 
-`@agentclientprotocol/sdk` is a regular dependency and installs with the bridge. Add it yourself only if you import its types directly.
+`@agentclientprotocol/sdk` is a regular dependency and installs with the bridge. The bridge's API uses its 2.x types, so if you import SDK types yourself, install `@agentclientprotocol/sdk` 2.x as well.
 
 ## Usage
 
