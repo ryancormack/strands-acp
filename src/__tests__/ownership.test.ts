@@ -86,6 +86,41 @@ describe('session ownership', () => {
     expect(agents[0]!.cancel).not.toHaveBeenCalled()
   })
 
+  it("answers -32002 on the wire when closing another caller's session", async () => {
+    // SDK clients report -32002 on session/close as success, so this speaks raw JSON-RPC.
+    const { alice, bob } = pair({ agentFactory: () => createMockAgent() })
+    const aliceConn = await connect(alice)
+    const { sessionId } = await aliceConn.newSession({ cwd: '/p', mcpServers: [] })
+
+    const clientToAgent = new TransformStream<Uint8Array, Uint8Array>()
+    const agentToClient = new TransformStream<Uint8Array, Uint8Array>()
+    bob.connect(ndJsonStream(agentToClient.writable, clientToAgent.readable))
+    const writer = clientToAgent.writable.getWriter()
+    const reader = agentToClient.readable.pipeThrough(new TextDecoderStream()).getReader()
+    const send = (message: object) => writer.write(new TextEncoder().encode(`${JSON.stringify(message)}\n`))
+    let buffered = ''
+    const response = async (id: number) => {
+      for (;;) {
+        for (const line of buffered.split('\n').filter(Boolean)) {
+          const message = JSON.parse(line)
+          if (message.id === id) return message
+        }
+        const { value, done } = await reader.read()
+        if (done) throw new Error(`stream ended before response ${id}`)
+        buffered += value
+      }
+    }
+
+    await send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} } })
+    await response(1)
+    await send({ jsonrpc: '2.0', id: 2, method: 'session/close', params: { sessionId } })
+
+    expect((await response(2)).error?.code).toBe(-32002)
+    await expect(aliceConn.prompt({ sessionId, prompt: [{ type: 'text', text: 'still mine' }] })).resolves.toMatchObject({
+      stopReason: 'end_turn',
+    })
+  })
+
   it("refuses to load or resume another caller's live session", async () => {
     const { alice, bob } = pair({ agentFactory: () => createMockAgent() })
     const { sessionId } = await (await connect(alice)).newSession({ cwd: '/p', mcpServers: [] })
