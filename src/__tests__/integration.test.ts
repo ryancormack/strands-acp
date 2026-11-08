@@ -14,6 +14,7 @@ import {
   InterventionHandler,
   InterventionActions,
   type BeforeToolCallEvent,
+  type ModelStreamEvent,
 } from '@strands-agents/sdk'
 import { z } from 'zod'
 import { createAgentApp, type AcpBridgeConfig } from '../acp-agent.js'
@@ -50,7 +51,11 @@ class StubModel extends Model {
     return this.config
   }
 
-  async *stream(): AsyncGenerator<Record<string, unknown>> {
+  stream(): AsyncIterable<ModelStreamEvent> {
+    return this.scripted() as AsyncIterable<ModelStreamEvent>
+  }
+
+  private async *scripted(): AsyncGenerator<Record<string, unknown>> {
     // Reuse the final turn if the loop asks for more than were scripted.
     const turn = this.turns[Math.min(this.turnIndex, this.turns.length - 1)]
     this.turnIndex += 1
@@ -135,7 +140,7 @@ function buildHarness(
         model: new StubModel([
           { toolUse: { name: 'write_file', toolUseId: 'call-1', input: { path: '/tmp/a.txt', content: 'hi' } } },
           { text: 'all done' },
-        ]) as unknown as ConstructorParameters<typeof Agent>[0]['model'],
+        ]),
         tools: [writeFile],
         ...(interventions ? { interventions } : {}),
       }),
